@@ -1,0 +1,15 @@
+{
+  "name": "Super Flasch Bros. 2",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:1-22-bookworm",
+  "forwardPorts": [5173, 8080],
+  "portsAttributes": {
+    "5173": { "label": "Vite client", "onAutoForward": "openBrowser" },
+    "8080": { "label": "WebSocket server" }
+  },
+  "postCreateCommand": "npm ci",
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint", "esbenp.prettier-vscode"]
+    }
+  }
+}

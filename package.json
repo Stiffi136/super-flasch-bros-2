@@ -1,0 +1,27 @@
+{
+  "name": "super-flasch-bros-2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "dev:server": "tsx watch server/src/index.ts",
+    "build": "tsc --noEmit && vite build",
+    "build:server": "tsc -p server/tsconfig.json",
+    "start:server": "node dist-server/server/src/index.js",
+    "preview": "vite preview --host 0.0.0.0",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "phaser": "^3.90.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5",
+    "vitest": "^5.1.0"
+  }
+}
