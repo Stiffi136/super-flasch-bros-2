@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "dev:server": "tsx watch server/src/index.ts",
+    "editor": "vite --config vite.editor.config.ts",
+    "build:editor": "tsc --noEmit && vite build --config vite.editor.config.ts",
     "build": "tsc --noEmit && vite build",
     "build:server": "tsc -p server/tsconfig.json",
     "start:server": "node dist-server/server/src/index.js",

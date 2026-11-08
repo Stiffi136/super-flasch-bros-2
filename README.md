@@ -21,6 +21,31 @@ Im Mehrspielerkasten Namen und Serveradresse eingeben (`ws://localhost:8080/ws` 
 
 Das Rennen verwendet clientseitige Spielphysik und überträgt Positionen; es ist **nicht gegen Manipulation geschützt**. Die Reihenfolge der Zieleingänge bestimmt der Server anhand der eingehenden Meldungen. Ein Serverneustart beendet alle Lobbys. Details stehen in `server/README.md`.
 
+## Lokaler Moduleditor
+
+Der Editor läuft separat vom Spiel und ohne Spielserver:
+
+```sh
+npm ci                 # einmalig, falls noch nicht geschehen
+npm run editor
+```
+
+Anschließend `http://127.0.0.1:5174/` im Browser öffnen. Der Editor lauscht nur lokal und wird nicht mit dem Spiel auf GitHub Pages veröffentlicht. Im Dev-Container wird Port 5174 weitergeleitet. Module lassen sich als JSON herunterladen und später wieder importieren; es gibt keine automatische Speicherung auf dem Server. **Neues Modul** beginnt einen leeren Entwurf mit neuer ID. **Als neues Modul exportieren** erzeugt eine Kopie mit eigener ID; der normale Export behält die ID und eignet sich zum Aktualisieren einer vorhandenen Datei.
+
+Die ein- und ausblendbare Sprunghilfe zeigt über dem Boden und soliden Blöcken die ungefähre Steighöhe und Kopfreichweite bei gehaltenem Sprung. Sie berücksichtigt weder Hindernisse noch horizontale Bewegung und ist kein Erreichbarkeitsnachweis.
+
+Die Datei beschreibt ein Modul mit Versionskennung, ID, Name, Breite und Rechtecken. Die X-Koordinaten beginnen am linken Modulrand; Y ist relativ zum Boden (`0` = Bodenoberkante, negative Werte liegen darüber). Der Generator stellt den Boden selbst bereit. `solid` kollidiert und erlaubt Wand-/Deckenkontakt, `hazard` ist auf seiner gesamten Rechteckfläche gefährlich, `grip` ist nur eine visuelle Markierung. Checkpoints und Ziel werden vom Generator gesetzt.
+
+### Eigene Module im Spiel verwenden
+
+1. Im Editor ein Modul als JSON exportieren.
+2. Die Datei aus dem Download-Ordner nach `modules/` im Projekt kopieren, zum Beispiel `modules/mein-modul.json`. Nur Dateien direkt in diesem Ordner werden geladen.
+3. Spiel mit `npm run dev` starten. Nach dem Hinzufügen oder Entfernen einer Datei den Entwicklungsserver neu starten und die Seite neu laden; Änderungen an bestehenden Dateien erfordern ein Neuladen. Für eine Veröffentlichung `npm run build` erneut ausführen und den neuen Build deployen.
+
+Der Generator verwendet ausschließlich die JSON-Module aus `modules/` und mischt sie deterministisch zu 24 Abschnitten. Abhängig von Seed und Anzahl der Dateien kann nicht jedes Modul in jedem Rennen vorkommen. Ein automatischer Checkpoint entfällt, falls der vorgesehene Bereich innerhalb eines Moduls blockiert ist. Mindestens eine gültige Moduldatei ist erforderlich; fehlende, ungültige oder doppelte Modul-IDs werden mit einer Fehlermeldung angezeigt.
+
+Im Multiplayer müssen alle Teilnehmer denselben Spiel-Build und dasselbe Modulset verwenden. Der Server vergleicht beim Lobbybeitritt einen Fingerabdruck und verweigert abweichende Modulsets; dafür muss auch der aktualisierte Server laufen. Der Fingerabdruck schützt nicht vor absichtlicher Manipulation. Eine gültige Datei garantiert weder einen freien Übergang noch die spielerische Lösbarkeit.
+
 ## Prüfen und bauen
 
 ```sh
@@ -28,6 +53,7 @@ npm test
 npx vitest run server/test
 npx vitest run --config /dev/null client/multiplayer.test.ts
 npm run build
+npm run build:editor
 npm run build:server
 ```
 
