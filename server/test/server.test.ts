@@ -25,8 +25,8 @@ const receive = (ws: WebSocket) => new Promise<Record<string, unknown>>((resolve
   const timeout = setTimeout(() => reject(new Error("Timed out waiting for message")), 1500);
   inbox.waiters.push((message) => { clearTimeout(timeout); resolve(message); });
 });
-const startApp = async () => {
-  const app = createGameServer({ port: 0, host: "127.0.0.1", allowedOrigins: ["http://allowed.test"] });
+const startApp = async (countdownMs = 20) => {
+  const app = createGameServer({ port: 0, host: "127.0.0.1", allowedOrigins: ["http://allowed.test"], countdownMs });
   apps.push(app); await app.listen();
   const address = app.address();
   if (!address || typeof address === "string") throw new Error("No TCP address");
@@ -50,9 +50,12 @@ describe("multiplayer server", () => {
     await awaitType(guest, "welcome"); await awaitType(host, "lobby");
     send(host, { type: "start" });
     const started = await awaitType(host, "started");
+    expect(started.raceId).toEqual(expect.any(String));
     expect(started.seed).toEqual(expect.any(Number));
+    expect(started.countdownMs).toBe(20);
     await awaitType(guest, "started");
-    const state = { type: "state", seq: 1, x: 3, y: 4, vx: 2, vy: -1, grounded: false, wall: 0, ceiling: false, sliding: true, facing: 1, lean: 0.2, runPhase: 5, deaths: 0, finished: false };
+    await awaitType(host, "go"); await awaitType(guest, "go");
+    const state = { type: "state", raceId: started.raceId, seq: 1, x: 3, y: 4, vx: 2, vy: -1, grounded: false, wall: 0, ceiling: false, sliding: true, facing: 1, lean: 0.2, runPhase: 5, deaths: 0, finished: false };
     send(host, state);
     expect(await awaitType(guest, "state")).toEqual({ ...state, id: welcome.id });
     send(host, { ...state, seq: 2, finished: true });
@@ -60,6 +63,107 @@ describe("multiplayer server", () => {
     expect(await awaitType(guest, "state")).toMatchObject({ type: "state", id: welcome.id, seq: 2, finished: true });
     send(guest, { ...state, seq: 1, finished: true });
     expect(await awaitType(host, "state")).toMatchObject({ type: "state", seq: 1, finished: true });
+    host.close(); guest.close();
+  });
+
+  it("completes when remaining players finish, keeps the first winner, resets for repeated races, and allows any member to return", async () => {
+    const url = await startApp();
+    const host = await connect(url), guest = await connect(url), outsider = await connect(url);
+    send(host, { type: "create", name: "Host", bottle: 0 });
+    const welcome = await awaitType(host, "welcome");
+    send(guest, { type: "join", code: welcome.code, name: "Guest", bottle: 1 });
+    await awaitType(guest, "welcome"); await awaitType(host, "lobby");
+    send(host, { type: "start" }); const firstStarted = await awaitType(host, "started"); await awaitType(guest, "started");
+    await awaitType(host, "go"); await awaitType(guest, "go");
+    const finished = { type: "state", raceId: firstStarted.raceId, seq: 1, x: 0, y: 0, vx: 0, vy: 0, grounded: true, wall: 0, ceiling: false, sliding: false, facing: 1, lean: 0, runPhase: 0, deaths: 0, finished: true };
+    send(host, finished);
+    expect(await awaitType(guest, "winner")).toEqual({ type: "winner", id: welcome.id });
+    await awaitType(guest, "state");
+    send(guest, finished);
+    expect(await awaitType(host, "state")).toMatchObject({ finished: true });
+    expect(await awaitType(host, "race-complete")).toEqual({ type: "race-complete", winnerId: welcome.id });
+    expect(await awaitType(guest, "race-complete")).toEqual({ type: "race-complete", winnerId: welcome.id });
+    send(guest, { type: "return-to-lobby" });
+    expect(await awaitType(host, "lobby-reset")).toMatchObject({ seed: 0, hostId: welcome.id });
+    expect(await awaitType(guest, "lobby-reset")).toMatchObject({ seed: 0 });
+    send(outsider, { type: "create", name: "Other", bottle: 2 }); await awaitType(outsider, "welcome");
+    send(outsider, { type: "return-to-lobby" });
+    expect((await awaitType(outsider, "error")).message).toContain("complete");
+    send(host, { type: "start" }); const secondStarted = await awaitType(host, "started"); await awaitType(guest, "started");
+    await awaitType(host, "go"); await awaitType(guest, "go");
+    send(host, { ...finished, raceId: secondStarted.raceId, seq: 1 });
+    expect(await awaitType(guest, "winner")).toMatchObject({ id: welcome.id });
+    await awaitType(guest, "state");
+    send(guest, { ...finished, raceId: secondStarted.raceId, seq: 1 });
+    await awaitType(host, "state");
+    expect(await awaitType(host, "race-complete")).toMatchObject({ winnerId: welcome.id });
+    expect(await awaitType(guest, "race-complete")).toMatchObject({ winnerId: welcome.id });
+    host.close(); guest.close(); outsider.close();
+  });
+
+  it("silently drops late finished and stale-race states", async () => {
+    const url = await startApp();
+    const host = await connect(url), guest = await connect(url);
+    send(host, { type: "create", name: "Host", bottle: 0 });
+    const lobby = await awaitType(host, "welcome");
+    send(guest, { type: "join", code: lobby.code, name: "Guest", bottle: 1 });
+    await awaitType(guest, "welcome"); await awaitType(host, "lobby");
+    send(host, { type: "start" }); const started = await awaitType(host, "started"); await awaitType(guest, "started");
+    await awaitType(host, "go"); await awaitType(guest, "go");
+    const state = { type: "state", raceId: started.raceId, seq: 1, x: 0, y: 0, vx: 0, vy: 0, grounded: true, wall: 0, ceiling: false, sliding: false, facing: 1, lean: 0, runPhase: 0, deaths: 0, finished: true };
+    send(host, state);
+    await awaitType(guest, "winner"); await awaitType(guest, "state");
+    send(host, { ...state, seq: 2 });
+    send(guest, state);
+    await awaitType(host, "state");
+    await awaitType(host, "race-complete"); await awaitType(guest, "race-complete");
+    send(host, { ...state, seq: 3 });
+    send(guest, { type: "return-to-lobby" });
+    await awaitType(host, "lobby-reset"); await awaitType(guest, "lobby-reset");
+    send(host, { ...state, seq: 4 });
+    send(host, { type: "start" }); const next = await awaitType(host, "started"); await awaitType(guest, "started");
+    await awaitType(host, "go"); await awaitType(guest, "go");
+    send(host, { ...state, seq: 5 });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(inboxes.get(host)?.queue.some((message) => message.type === "error")).toBe(false);
+    expect(inboxes.get(guest)?.queue.some((message) => message.type === "error")).toBe(false);
+    expect(next.raceId).not.toBe(started.raceId);
+    host.close(); guest.close();
+  });
+
+  it("completes a race when unfinished players disconnect", async () => {
+    const url = await startApp();
+    const host = await connect(url), guest = await connect(url);
+    send(host, { type: "create", name: "Host", bottle: 0 });
+    const lobby = await awaitType(host, "welcome");
+    send(guest, { type: "join", code: lobby.code, name: "Guest", bottle: 1 });
+    await awaitType(guest, "welcome"); await awaitType(host, "lobby");
+    send(host, { type: "start" }); const started = await awaitType(host, "started"); await awaitType(guest, "started");
+    await awaitType(host, "go"); await awaitType(guest, "go");
+    const finished = { type: "state", raceId: started.raceId, seq: 1, x: 0, y: 0, vx: 0, vy: 0, grounded: true, wall: 0, ceiling: false, sliding: false, facing: 1, lean: 0, runPhase: 0, deaths: 0, finished: true };
+    send(host, finished); await awaitType(guest, "winner"); await awaitType(guest, "state");
+    guest.close();
+    await awaitType(host, "player-left");
+    await awaitType(host, "lobby");
+    expect(await awaitType(host, "race-complete")).toMatchObject({ winnerId: lobby.hostId });
+    host.close();
+  });
+
+  it("rejects state before go and relays state after the server go signal", async () => {
+    const url = await startApp(80);
+    const host = await connect(url), guest = await connect(url);
+    send(host, { type: "create", name: "Host", bottle: 0 });
+    const lobby = await awaitType(host, "welcome");
+    send(guest, { type: "join", code: lobby.code, name: "Guest", bottle: 1 });
+    await awaitType(guest, "welcome"); await awaitType(host, "lobby");
+    send(host, { type: "start" });
+    const started = await awaitType(host, "started"); await awaitType(guest, "started");
+    const state = { type: "state", raceId: started.raceId, seq: 1, x: 0, y: 0, vx: 0, vy: 0, grounded: true, wall: 0, ceiling: false, sliding: false, facing: 1, lean: 0, runPhase: 0, deaths: 0, finished: false };
+    send(host, state);
+    expect((await awaitType(host, "error")).message).toContain("game has not started");
+    await awaitType(host, "go"); await awaitType(guest, "go");
+    send(host, state);
+    expect(await awaitType(guest, "state")).toMatchObject({ type: "state", seq: 1 });
     host.close(); guest.close();
   });
 
@@ -71,6 +175,7 @@ describe("multiplayer server", () => {
     send(host, { type: "start" }); expect((await awaitType(host, "error")).message).toContain("2 players");
     send(guest, { type: "join", code: h.code, name: "Guest", bottle: 2 }); await awaitType(guest, "welcome");
     send(host, { type: "start" }); await awaitType(host, "started"); await awaitType(guest, "started");
+    await awaitType(host, "go"); await awaitType(guest, "go");
     send(late, { type: "join", code: h.code, name: "Late", bottle: 0 }); expect((await awaitType(late, "error")).message).toContain("already started");
     const invalid = { type: "state", seq: 1, x: Infinity, y: 0, vx: 0, vy: 0, grounded: true, wall: 0, ceiling: false, sliding: false, facing: 1, lean: 0, runPhase: 0, deaths: 0, finished: false };
     send(host, invalid); expect((await awaitType(host, "error")).message).toContain("Invalid state");

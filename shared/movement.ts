@@ -1,6 +1,13 @@
 /** Timers for leaving an automatically grabbed surface without instantly reattaching. */
 export const RELEASE_LOCK_SECONDS = 0.2;
 export const WALL_JUMP_LOCK_SECONDS = 0.16;
+/** Extra distance beyond the bottle half-width that still counts as a ceiling edge. */
+export const CEILING_CORNER_EDGE_MARGIN = 16;
+/** Maximum vertical mismatch for a verified ceiling contact. */
+export const CEILING_CONTACT_TOLERANCE = 1;
+/** Initial upward velocity for normal jumps and exposed ceiling corner launches. */
+export const JUMP_UPWARD_VELOCITY = -590;
+export const CEILING_CORNER_UPWARD_VELOCITY = JUMP_UPWARD_VELOCITY;
 
 // World units per second. Keep these values shared with tests and animation.
 export const RUN_SPEED = 480;
@@ -38,6 +45,38 @@ export function ceilingSwingVelocity(entryVelocity: number, direction: number, f
   const boost = 360 * Math.exp(-3 * Math.max(0, gripSeconds));
   const carried = Math.min(MAX_SWING_SPEED, Math.abs(entryVelocity)) * Math.exp(-2 * Math.max(0, gripSeconds));
   return sign * Math.min(MAX_SWING_SPEED, Math.max(190, carried) + boost);
+}
+
+export type SolidRect = { x: number; y: number; w: number; h: number };
+/** Return the outward launch direction only at a real, exposed ceiling corner. */
+export type CeilingCornerLaunch = { direction: -1 | 1; roof: SolidRect };
+export function findCeilingCornerLaunch(playerX: number, playerY: number, playerWidth: number, solids: SolidRect[], launchVelocity: number): CeilingCornerLaunch | null {
+  const direction = Math.sign(launchVelocity);
+  if (!direction) return null;
+  const playerCenter = playerX + playerWidth / 2;
+  for (const roof of solids) {
+    const ceilingY = roof.y + roof.h;
+    if (Math.abs(playerY - ceilingY) > CEILING_CONTACT_TOLERANCE || playerCenter <= roof.x || playerCenter >= roof.x + roof.w) continue;
+    const edgeX = direction < 0 ? roof.x : roof.x + roof.w;
+    const distance = Math.abs(playerCenter - edgeX);
+    if (distance > playerWidth / 2 + CEILING_CORNER_EDGE_MARGIN) continue;
+    // A contiguous solid across the edge makes this an interior seam, not an exposed corner.
+    const joined = solids.some(other => other !== roof && other.y <= ceilingY && other.y + other.h >= ceilingY &&
+      (direction < 0 ? other.x < edgeX && other.x + other.w >= edgeX : other.x <= edgeX && other.x + other.w > edgeX));
+    if (!joined) return { direction: direction as -1 | 1, roof };
+  }
+  return null;
+}
+
+export function ceilingCornerLaunchDirection(playerX: number, playerY: number, playerWidth: number, solids: SolidRect[], launchVelocity: number): -1 | 1 | null {
+  return findCeilingCornerLaunch(playerX, playerY, playerWidth, solids, launchVelocity)?.direction ?? null;
+}
+
+/** Ignore only the launched roof while the player moves upward and outward under it. */
+export function shouldSkipCeilingCornerRoofCollision(playerX: number, playerWidth: number, velocityX: number, velocityY: number, direction: -1 | 1, candidateRoof: SolidRect, launchedRoof: SolidRect): boolean {
+  if (candidateRoof !== launchedRoof) return false;
+  const stillOverlapsRoof = playerX < candidateRoof.x + candidateRoof.w && playerX + playerWidth > candidateRoof.x;
+  return velocityY < 0 && Math.sign(velocityX) === direction && stillOverlapsRoof;
 }
 
 /** Horizontal movement in one physics step, independent of rendering. */

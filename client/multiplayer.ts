@@ -17,18 +17,23 @@ export type PlayerState = {
   deaths: number;
   finished: boolean;
 };
-export type RemoteState = PlayerState & { id: string };
+export type RemoteState = PlayerState & { id: string; raceId: string };
 
 export type MultiplayerCallbacks = {
   onOpen?: () => void;
   onWelcome?: (message: { id: string; code: string; hostId: string; seed: number; players: PlayerInfo[] }) => void;
   onLobby?: (message: { code: string; hostId: string; seed: number; players: PlayerInfo[] }) => void;
-  onStarted?: (message: { seed: number }) => void;
+  /** The server starts its countdown on receipt; countdownMs is not a synchronized client clock and network latency may vary. */
+  onStarted?: (message: { seed: number; countdownMs: number; raceId: string }) => void;
+  /** Called when the server broadcasts go. Use this as the authoritative start signal; no clock synchronization is provided. */
+  onGo?: () => void;
   onState?: (state: RemoteState) => void;
   onServerError?: (message: string) => void;
   onPlayerLeft?: (id: string) => void;
   onHostChanged?: (hostId: string) => void;
   onWinner?: (id: string) => void;
+  onRaceComplete?: (message: { winnerId: string | null }) => void;
+  onReturnToLobby?: (message: { code: string; hostId: string; seed: number; players: PlayerInfo[] }) => void;
   onError?: (error: Error) => void;
   onClose?: (event: CloseEvent) => void;
 };
@@ -42,7 +47,7 @@ export type MultiplayerOptions = {
   WebSocketCtor?: new (url: string) => WebSocket;
 };
 
-const STATE_KEYS = ['seq', 'x', 'y', 'vx', 'vy', 'grounded', 'wall', 'ceiling', 'sliding', 'facing', 'lean', 'runPhase', 'deaths', 'finished'] as const;
+const STATE_KEYS = ['raceId', 'seq', 'x', 'y', 'vx', 'vy', 'grounded', 'wall', 'ceiling', 'sliding', 'facing', 'lean', 'runPhase', 'deaths', 'finished'] as const;
 const MAX_MODULE_HASH_LENGTH = 256;
 function validModuleHash(value: unknown): value is string {
   return typeof value === 'string' && value.length <= MAX_MODULE_HASH_LENGTH && /^[A-Za-z0-9._:-]*$/.test(value);
@@ -68,7 +73,7 @@ function validPlayers(value: unknown): value is PlayerInfo[] {
   return Array.isArray(value) && value.length <= 8 && value.every(validPlayer);
 }
 function validPlayerState(value: Record<string, unknown>): boolean {
-  if (!exactKeys(value, STATE_KEYS)) return false;
+  if (!exactKeys(value, STATE_KEYS) || !validString(value.raceId) || value.raceId.length > 80) return false;
   return Number.isSafeInteger(value.seq) && (value.seq as number) >= 0 &&
     ['x', 'y', 'vx', 'vy', 'lean', 'runPhase'].every((key) => finite(value[key]) && Math.abs(value[key] as number) <= 1_000_000) &&
     [-1, 0, 1].includes(value.wall as number) && [-1, 0, 1].includes(value.facing as number) &&
@@ -92,6 +97,7 @@ export class MultiplayerClient {
   readonly socket: WebSocket;
   readonly callbacks: MultiplayerCallbacks;
   private readonly lastSeqByPlayer = new Map<string, number>();
+  private raceId = '';
   private readonly moduleHash?: string;
   private closed = false;
 
@@ -124,9 +130,15 @@ export class MultiplayerClient {
     this.send({ type: 'start' });
   }
 
+  returnToLobby(): void {
+    this.send({ type: 'return-to-lobby' });
+  }
+
   sendState(state: PlayerState): void {
-    if (!validPlayerState(state)) throw new TypeError('Invalid player state.');
-    this.send({ type: 'state', ...state });
+    if (!this.raceId) throw new Error('Race has not started.');
+    const message = { ...state, raceId: this.raceId };
+    if (!validPlayerState(message)) throw new TypeError('Invalid player state.');
+    this.send({ type: 'state', ...message });
   }
 
   close(code?: number, reason?: string): void {
@@ -169,13 +181,20 @@ export class MultiplayerClient {
         this.callbacks.onLobby?.({ code: value.code, hostId: value.hostId, seed: value.seed, players: value.players });
         return;
       case 'started':
-        if (!exactKeys(value, ['type', 'seed']) || !finite(value.seed)) break;
-        this.callbacks.onStarted?.({ seed: value.seed });
+        if (!exactKeys(value, ['type', 'seed', 'countdownMs', 'raceId']) || !finite(value.seed) || !Number.isSafeInteger(value.countdownMs) || (value.countdownMs as number) < 0 || !validString(value.raceId) || value.raceId.length > 80) break;
+        this.raceId = value.raceId;
+        this.lastSeqByPlayer.clear();
+        this.callbacks.onStarted?.({ seed: value.seed, countdownMs: value.countdownMs as number, raceId: value.raceId });
+        return;
+      case 'go':
+        if (!exactKeys(value, ['type'])) break;
+        this.callbacks.onGo?.();
         return;
       case 'state': {
         if (!exactKeys(value, ['type', 'id', ...STATE_KEYS]) || !validString(value.id)) break;
         const state = Object.fromEntries(STATE_KEYS.map((key) => [key, value[key]])) as unknown as Record<string, unknown>;
         if (!validPlayerState(state)) break;
+        if (state.raceId !== this.raceId) return;
         const previous = this.lastSeqByPlayer.get(value.id);
         if (previous !== undefined && (state.seq as number) <= previous) return;
         this.lastSeqByPlayer.set(value.id, state.seq as number);
@@ -197,6 +216,17 @@ export class MultiplayerClient {
       case 'winner':
         if (!exactKeys(value, ['type', 'id']) || !validString(value.id)) break;
         this.callbacks.onWinner?.(value.id);
+        return;
+      case 'race-complete':
+        if (!exactKeys(value, ['type', 'winnerId']) || !(value.winnerId === null || validString(value.winnerId))) break;
+        this.raceId = '';
+        this.callbacks.onRaceComplete?.({ winnerId: value.winnerId });
+        return;
+      case 'lobby-reset':
+        if (!exactKeys(value, ['type', 'code', 'hostId', 'seed', 'players']) || !validString(value.code) || !validString(value.hostId) || !finite(value.seed) || !validPlayers(value.players)) break;
+        this.lastSeqByPlayer.clear();
+        this.raceId = '';
+        this.callbacks.onReturnToLobby?.({ code: value.code, hostId: value.hostId, seed: value.seed, players: value.players });
         return;
       default:
         break;

@@ -22,23 +22,27 @@ Client to server:
 {"type":"create","name":"Ada","bottle":0}
 {"type":"join","code":"ABC234","name":"Lin","bottle":1}
 {"type":"start"}
-{"type":"state","seq":1,"x":0,"y":0,"vx":0,"vy":0,"grounded":true,"wall":0,"ceiling":false,"sliding":false,"facing":1,"lean":0,"runPhase":0,"deaths":0,"finished":false}
+{"type":"return-to-lobby"}
+{"type":"state","raceId":"server-issued-race-id","seq":1,"x":0,"y":0,"vx":0,"vy":0,"grounded":true,"wall":0,"ceiling":false,"sliding":false,"facing":1,"lean":0,"runPhase":0,"deaths":0,"finished":false}
 ```
 
-The state message requires all listed fields. Numeric values must be finite and within reasonable bounds; booleans and integer fields are checked. Sequence numbers must strictly increase per connection. Unknown keys are rejected. State messages are relayed to all other players in the same started room, with the server-assigned `id` added; the sender does not receive an echo.
+The state message requires all listed fields. Numeric values must be finite and within reasonable bounds; booleans and integer fields are checked. Sequence numbers must strictly increase per connection and race. The state `raceId` must match the current race. Unknown keys are rejected. Valid late states from a finished player, a completed race, or an older race are silently discarded. State messages are accepted and relayed only after `go`, with the server-assigned `id` added; the sender does not receive an echo.
 
 Server to client:
 
 - `welcome`: `{type,id,code,hostId,seed,players:[{id,name,bottle}]}`
 - `lobby`: `{type,code,hostId,seed,players:[{id,name,bottle}]}`
-- `started`: `{type,seed}`
+- `started`: `{type,seed,countdownMs,raceId}` – starts the countdown and supplies the server-issued identifier required on state messages; the default duration is 3000 ms.
+- `go`: `{type}` – releases the race after the countdown.
 - `winner`: `{type,id}` (broadcast once, before forwarding the winning finished state)
-- `state`: `{type,id,seq,x,y,vx,vy,grounded,wall,ceiling,sliding,facing,lean,runPhase,deaths,finished}`
+- `race-complete`: `{type,winnerId}` (broadcast once when every remaining player has finished; `winnerId` is `null` if no player finished)
+- `lobby-reset`: `{type,code,hostId,seed,players}` (broadcast to all current room members after a completed race returns to the lobby)
+- `state`: `{type,id,raceId,seq,x,y,vx,vy,grounded,wall,ceiling,sliding,facing,lean,runPhase,deaths,finished}`
 - `error`: `{type,message}`
 - `player-left`: `{type,id}`
 - `host-changed`: `{type,hostId}`
 
-Lobby codes contain 6 unambiguous uppercase letters/digits. Rooms support 2–8 players. Only the host can start, and start requires at least 2 players. Started rooms reject new joins. The host is the first remaining player after host disconnect. Empty rooms are removed. The seed is a random unsigned 32-bit integer assigned at start. The first valid state with `finished:true` wins: the server broadcasts `{type:"winner",id}` once per lobby, before forwarding that state. Other players can continue playing. The winner is not reset during the lobby; a new lobby starts without a winner.
+Lobby codes contain 6 unambiguous uppercase letters/digits. Rooms support 2–8 players. Only the host can start, and start requires at least 2 players. Started rooms reject new joins. The host is the first remaining player after host disconnect. Empty rooms are removed. The seed is a random unsigned 32-bit integer assigned at start. The server sends `go` after the countdown; clients start on receipt, so network and loading delays can cause small start-time differences. There is no synchronized clock or authoritative physics. The first valid state with `finished:true` wins: the server broadcasts `{type:"winner",id}` once per race, before forwarding that state. Finished status is tracked for each connected player. The server broadcasts `race-complete` once all remaining players have finished; a player who disconnects no longer blocks completion. Any room member can send `return-to-lobby` after completion. The server keeps the room and host, clears the seed and winner, resets each player's sequence and finish status, and broadcasts `lobby-reset`. The host can then start another race. A `return-to-lobby` request before completion is rejected.
 
 ## Trust model
 

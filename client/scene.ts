@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { BOTTLES, BottleIndex, generateLevel, Level, Platform } from '../shared/game';
-import { advanceRunTime, ceilingSwingVelocity, decideGrab, horizontalVelocity, RELEASE_LOCK_SECONDS, RUN_SPEED, runningSpeed, WALL_JUMP_LOCK_SECONDS, wallJumpVelocity } from '../shared/movement';
+import { advanceRunTime, ceilingSwingVelocity, CEILING_CORNER_UPWARD_VELOCITY, decideGrab, findCeilingCornerLaunch, horizontalVelocity, JUMP_UPWARD_VELOCITY, RELEASE_LOCK_SECONDS, RUN_SPEED, runningSpeed, shouldSkipCeilingCornerRoofCollision, WALL_JUMP_LOCK_SECONDS, wallJumpVelocity } from '../shared/movement';
 import { solveLimb } from '../shared/ik';
 import { checkpointSpawn } from '../shared/checkpoint';
 import { drawFactoryEnvironment } from './factory';
@@ -9,10 +9,11 @@ import { SnapshotInterpolator } from './interpolation';
 import { CeilingSwingEffects, SwingEffectsFrame } from './swing-effects';
 import { customModules } from './custom-modules';
 import { CAMERA_LOOK_AHEAD, smoothCameraOffset } from './camera';
+import { advanceCountdown, countdownLabel, COUNTDOWN_DURATION_SECONDS } from './countdown';
 
 type Mode = 'menu' | 'play' | 'won';
 export type MultiplayerState = {seq:number;x:number;y:number;vx:number;vy:number;grounded:boolean;wall:number;ceiling:boolean;sliding:boolean;facing:number;lean:number;runPhase:number;deaths:number;finished:boolean};
-type MultiplayerOptions = {players:Array<{id:string;name:string;bottle:number}>;selfId:string;onState:(state:MultiplayerState)=>void};
+type MultiplayerOptions = {players:Array<{id:string;name:string;bottle:number}>;selfId:string;onState:(state:MultiplayerState)=>void;onReturnToLobby?:()=>void};
 type BottlePose = Pick<MultiplayerState,'x'|'y'|'vx'|'grounded'|'wall'|'ceiling'|'sliding'|'facing'|'lean'|'runPhase'> & {bottle:number;animationTime:number;gripMin:number;gripMax:number;swing?:SwingEffectsFrame};
 type RemotePlayer = {id:string;name:string;bottle:number;interpolator:SnapshotInterpolator;label:Phaser.GameObjects.Text;effects:CeilingSwingEffects;lastState?:MultiplayerState;lastEffectTime?:number};
 type Dust = { x:number; y:number; vx:number; age:number; life:number; radius:number };
@@ -27,18 +28,21 @@ export class GameScene extends Phaser.Scene {
   private gripMin=0; private gripMax=0; private releaseLock=0; private lean=0; private runPhase=0;
   private coyote=0; private jumpBuffer=0; private checkpoint={x:40,y:456}; private deaths=0; private elapsed=0; private facing=1;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>; private lastJump=false; private accumulator=0; private startOnCreate=false;
+  private countdownElapsed=0; private countdownDuration=COUNTDOWN_DURATION_SECONDS; private countdownReleased=false; private multiplayerCountdownWaiting=false; private multiplayerCountdownMode=false; private goVisibleSeconds=0; private countdownText?:Phaser.GameObjects.Text;
   private followTarget?: Phaser.GameObjects.Zone; private cameraOffset=-CAMERA_LOOK_AHEAD;
   private dust:Dust[]=[]; private dustTimer=0; private runTime=0;
-  private ceilingGripTime=0; private ceilingEntryVelocity=0;
+  private ceilingGripTime=0; private ceilingEntryVelocity=0; private cornerEscapeRoof?:Platform; private cornerEscapeDirection: -1|1|0=0;
   private swingEffects=new CeilingSwingEffects(); private swingFrame:SwingEffectsFrame={lean:0,limbSwing:0,trail:[]};
   private multiplayer?:MultiplayerOptions; private remotePlayers=new Map<string,RemotePlayer>(); private networkClock=0; private stateSeq=0;
   private raceWinner?:{id:string;name:string}; private raceBanner?:Phaser.GameObjects.Text;
+  private raceComplete=false; private resultStatus?:Phaser.GameObjects.Text; private returnButton?:Phaser.GameObjects.Text;
   private updateSpeedometer!:(speed:number)=>void;
   constructor(){super('game');}
-  init(data?:{bottleIndex?:number;seed?:number;startImmediately?:boolean}):void {
+  init(data?:{bottleIndex?:number;seed?:number;startImmediately?:boolean;multiplayerCountdown?:boolean}):void {
     if(data?.bottleIndex!==undefined && data.bottleIndex>=0 && data.bottleIndex<3) this.choice=data.bottleIndex as BottleIndex;
     if(data?.seed!==undefined) this.seed=data.seed>>>0;
     this.startOnCreate=data?.startImmediately??false;
+    this.multiplayerCountdownMode=data?.multiplayerCountdown??false;
   }
   create():void {
     // The canvas has twice the logical resolution; scale the world camera, not the physics.
@@ -59,8 +63,9 @@ export class GameScene extends Phaser.Scene {
     if(options.bottleIndex!==undefined&&options.bottleIndex>=0&&options.bottleIndex<3)this.choice=options.bottleIndex as BottleIndex;
     this.seed=options.seed===undefined?Math.floor(Math.random()*0x7fffffff):options.seed>>>0; this.startGame();
   }
-  public configureMultiplayer(options:{players:Array<{id:string;name:string;bottle:number}>;selfId:string;onState:(state:MultiplayerState)=>void}):void {
-    this.clearMultiplayer(); this.multiplayer=options; this.networkClock=0;this.raceWinner=undefined;
+  public configureMultiplayer(options:{players:Array<{id:string;name:string;bottle:number}>;selfId:string;onState:(state:MultiplayerState)=>void;onReturnToLobby?:()=>void}):void {
+    this.clearMultiplayer(); this.multiplayer=options; this.networkClock=0;this.raceWinner=undefined;this.raceComplete=false;
+    if(this.mode==='play'&&!this.countdownReleased)this.multiplayerCountdownWaiting=true;
     for(const player of options.players)if(player.id!==options.selfId)this.addRemotePlayer(player);
     this.ensureRaceBanner();
     if(this.mode==='won')this.publishLocalState(true);
@@ -73,10 +78,29 @@ export class GameScene extends Phaser.Scene {
 
   }
   public removeRemotePlayer(id:string):void {const player=this.remotePlayers.get(id);if(player){player.label.destroy();this.remotePlayers.delete(id);}}
-  public clearMultiplayer():void {for(const player of this.remotePlayers.values())player.label.destroy();this.remotePlayers.clear();this.multiplayer=undefined;this.networkClock=0;this.raceWinner=undefined;this.raceBanner?.destroy();this.raceBanner=undefined;}
+  public clearMultiplayer():void {for(const player of this.remotePlayers.values())player.label.destroy();this.remotePlayers.clear();this.multiplayer=undefined;this.networkClock=0;this.raceWinner=undefined;this.raceComplete=false;this.raceBanner?.destroy();this.raceBanner=undefined;
+    // A multiplayer countdown remains locked after disconnect. Only an explicit server GO releases it.
+    if(this.mode==='play'&&this.multiplayerCountdownMode&&!this.countdownReleased)this.multiplayerCountdownWaiting=true;
+  }
+  /** Begin the server-timed multiplayer countdown. Call after scene start/configuration. */
+  public beginMultiplayerCountdown(ms:number):void {
+    if(!this.multiplayerCountdownMode)return;
+    this.countdownDuration=Math.max(0,ms)/1000;this.countdownElapsed=0;this.countdownReleased=false;this.multiplayerCountdownWaiting=false;
+    if(!this.countdownText?.active){this.countdownText=this.text(W/2,H/2,'WARTEN',52,'#fff1c7').setPadding(24,12,24,12).setBackgroundColor('#172638ee').setDepth(25);this.ui.add(this.countdownText);}
+    this.accumulator=0;
+  }
+  /** Release local simulation only when the authoritative server sends onGo(). */
+  public releaseMultiplayerCountdown():void {
+    if(!this.multiplayerCountdownMode)return;
+    this.multiplayerCountdownWaiting=false;this.countdownReleased=true;this.goVisibleSeconds=.65;
+    this.countdownText?.setText('LOS!');
+    this.accumulator=0;this.lastJump=this.keys?.jump.isDown??false;
+  }
   public setRaceWinner(id:string):void {const name=this.multiplayer?.players.find(p=>p.id===id)?.name??(id===this.multiplayer?.selfId?'Du':id);this.raceWinner={id,name};this.updateRaceBanner();}
+  /** Mark the race complete. This can arrive before the local player finishes. */
+  public setRaceComplete():void {this.raceComplete=true;this.updateResultOverlay();}
   private ensureRaceBanner():void {if(!this.multiplayer||this.raceBanner||!this.ui)return;this.raceBanner=this.text(W/2,66,'',14,'#ffd66b').setPadding(10,5,10,5).setBackgroundColor('#172638dd');this.ui.add(this.raceBanner);this.updateRaceBanner();}
-  private updateRaceBanner():void {if(!this.raceBanner)return;this.raceBanner.setText(this.raceWinner?`GEWONNEN · ${this.raceWinner.name}`:'RENNEN · Wer zuerst ins Ziel kommt, gewinnt');}
+  private updateRaceBanner():void {if(!this.raceBanner?.active)return;this.raceBanner.setText(this.raceWinner?`GEWONNEN · ${this.raceWinner.name}`:'RENNEN · Wer zuerst ins Ziel kommt, gewinnt');}
   private addRemotePlayer(info:{id:string;name:string;bottle:number}):RemotePlayer {
     const label=this.add.text(0,0,info.name,{fontFamily:'Arial,sans-serif',fontSize:'11px',color:'#ffffff',stroke:'#10202d',strokeThickness:3,align:'center'}).setOrigin(.5,1).setDepth(10).setVisible(false);
     const player={id:info.id,name:info.name,bottle:Math.max(0,Math.min(BOTTLES.length-1,Math.floor(info.bottle))),interpolator:new SnapshotInterpolator(),label,effects:new CeilingSwingEffects()};this.remotePlayers.set(info.id,player);return player;
@@ -84,7 +108,7 @@ export class GameScene extends Phaser.Scene {
   private localState(finished=false):MultiplayerState{return {seq:++this.stateSeq,x:this.px,y:this.py,vx:this.vx,vy:this.vy,grounded:this.grounded,wall:this.wall,ceiling:this.ceiling,sliding:this.sliding,facing:this.facing,lean:this.lean,runPhase:this.runPhase,deaths:this.deaths,finished};}
   private publishLocalState(finished=false):void {if(this.multiplayer)this.multiplayer.onState(this.localState(finished));}
   private text(x:number,y:number,s:string,size:number,color='#f5f3ea',originX=0.5):Phaser.GameObjects.Text{return this.add.text(x,y,s,{fontFamily:'Arial,sans-serif',fontSize:`${size}px`,color,align:'center',wordWrap:{width:820},resolution:2}).setOrigin(originX,0.5).setScrollFactor(0);}
-  private clearUI():void{this.ui.removeAll(true);this.raceBanner=undefined;}
+  private clearUI():void{this.ui.removeAll(true);this.raceBanner=undefined;this.resultStatus=undefined;this.returnButton=undefined;}
   private drawMenu():void {
     this.mode='menu';this.clearUI();this.ui.add(this.text(W/2,80,'SUPER FLASCH BROS. 2',38));
     this.ui.add(this.text(W/2,128,'Ein SPS-Bug wurde zur Superkraft.',18,'#9fb8ce'));
@@ -97,8 +121,10 @@ export class GameScene extends Phaser.Scene {
   }
   private select(d:number):void{this.choice=((this.choice+d+3)%3) as BottleIndex;this.drawMenu();}
   private startGame():void {
-    this.mode='play';this.level=generateLevel(this.seed,customModules);this.px=this.level.spawn.x;this.py=this.level.spawn.y;this.vx=this.vy=0;this.checkpoint={...this.level.spawn};this.activeCheckpoint=undefined;this.deaths=0;this.elapsed=0;this.accumulator=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.lean=0;this.runPhase=0;this.lastJump=false;this.clearUI();
+    this.mode='play';this.level=generateLevel(this.seed,customModules);this.px=this.level.spawn.x;this.py=this.level.spawn.y;this.vx=this.vy=0;this.checkpoint={...this.level.spawn};this.activeCheckpoint=undefined;this.deaths=0;this.elapsed=0;this.accumulator=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.cornerEscapeRoof=undefined;this.cornerEscapeDirection=0;this.lean=0;this.runPhase=0;this.lastJump=false;this.clearUI();
     this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.swingEffects.reset();this.swingFrame=this.swingEffects.update(0,{x:this.px,y:this.py});this.gfx.clear();
+    this.countdownElapsed=0;this.countdownDuration=COUNTDOWN_DURATION_SECONDS;this.countdownReleased=false;this.goVisibleSeconds=0;this.multiplayerCountdownWaiting=this.multiplayerCountdownMode||!!this.multiplayer;
+    this.countdownText?.destroy();this.countdownText=this.text(W/2,H/2,this.multiplayer?'WARTEN':'3',52,'#fff1c7').setPadding(24,12,24,12).setBackgroundColor('#172638ee').setDepth(25);this.ui.add(this.countdownText);
     this.cameras.main.setBounds(-180,0,this.level.width+250,720);
     if (!this.followTarget || !this.followTarget.active) this.followTarget=this.add.zone(this.px,this.py,1,1);
     this.followTarget.setPosition(this.px+PW/2,this.py+PH/2);
@@ -117,7 +143,19 @@ export class GameScene extends Phaser.Scene {
   }
   update(_t:number,delta:number):void {
     if(this.mode==='won'&&this.multiplayer){this.gfx.clear();drawFactoryEnvironment(this.gfx,this.level,this.cameras.main);this.drawRemotePlayers();return;}
-    if(this.mode!=='play')return;this.accumulator+=Math.min(delta/1000,.1);let n=0;
+    if(this.mode!=='play')return;
+    if(!this.countdownReleased){
+      if(this.multiplayerCountdownWaiting){this.countdownText?.setText('WARTEN');this.drawWorld(PH);if(this.multiplayer)this.drawRemotePlayers();return;}
+      this.countdownElapsed=advanceCountdown(this.countdownElapsed,Math.max(0,delta)/1000,this.countdownDuration);
+      const label=countdownLabel(this.countdownElapsed,this.countdownDuration);
+      if(label){this.countdownText?.setText(label);this.drawWorld(PH);if(this.multiplayer)this.drawRemotePlayers();return;}
+      if(this.multiplayerCountdownMode){this.countdownText?.setText('WARTEN');this.drawWorld(PH);if(this.multiplayer)this.drawRemotePlayers();return;}
+      // Discard countdown time and stale input edges. Fixed-step simulation starts cleanly.
+      this.countdownReleased=true;this.goVisibleSeconds=.65;this.countdownText?.setText('LOS!');this.accumulator=0;this.lastJump=this.keys.jump.isDown;
+      this.drawWorld(PH);if(this.multiplayer)this.drawRemotePlayers();return;
+    }
+    if(this.goVisibleSeconds>0){this.goVisibleSeconds=Math.max(0,this.goVisibleSeconds-Math.max(0,delta)/1000);if(this.goVisibleSeconds===0){this.countdownText?.destroy();this.countdownText=undefined;}}
+    this.accumulator+=Math.min(delta/1000,.1);let n=0;
     while(this.accumulator>=FIXED&&n<8&&this.mode==='play'){this.simulate(FIXED);this.accumulator-=FIXED;n++;}if(n===8)this.accumulator=0;
     if(this.mode==='play'&&this.multiplayer){this.drawWorld(PH);this.drawRemotePlayers();}
   }
@@ -146,24 +184,43 @@ export class GameScene extends Phaser.Scene {
     this.wall=decision.wall;this.ceiling=decision.ceiling;
     if(decision.jump==='drop'){
       // Only a held ceiling grip launches forward; wall release still drops normally.
-      if(wasCeiling&&contactCeiling){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=Math.max(this.vy,150);this.swingEffects.trigger({x:this.px+PW/2,y:this.py+PH/2},Math.sign(this.vx)||this.facing);}
+      if(wasCeiling&&contactCeiling){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=Math.max(this.vy,150);const corner=findCeilingCornerLaunch(this.px,this.py,PW,solids,this.vx);if(corner){this.vy=CEILING_CORNER_UPWARD_VELOCITY;this.cornerEscapeRoof=corner.roof as Platform;this.cornerEscapeDirection=corner.direction;}this.swingEffects.trigger({x:this.px+PW/2,y:this.py+PH/2},Math.sign(this.vx)||this.facing);}
       else this.vy=Math.max(this.vy,90);
       this.releaseLock=RELEASE_LOCK_SECONDS;
     }
-    else if(decision.jump==='wall'&&contactWall!==0){this.vy=-590;this.vx=wallJumpVelocity(contactWall,this.runTime);this.releaseLock=WALL_JUMP_LOCK_SECONDS;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
-    else if(decision.jump==='ceiling'){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=150;this.swingEffects.trigger({x:this.px+PW/2,y:this.py+PH/2},Math.sign(this.vx)||this.facing);this.releaseLock=RELEASE_LOCK_SECONDS;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
-    else if(decision.jump==='ground'){this.vy=-590;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
+    else if(decision.jump==='wall'&&contactWall!==0){this.vy=JUMP_UPWARD_VELOCITY;this.vx=wallJumpVelocity(contactWall,this.runTime);this.releaseLock=WALL_JUMP_LOCK_SECONDS;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
+    else if(decision.jump==='ceiling'){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=150;const corner=findCeilingCornerLaunch(this.px,this.py,PW,solids,this.vx);if(corner){this.vy=CEILING_CORNER_UPWARD_VELOCITY;this.cornerEscapeRoof=corner.roof as Platform;this.cornerEscapeDirection=corner.direction;}this.swingEffects.trigger({x:this.px+PW/2,y:this.py+PH/2},Math.sign(this.vx)||this.facing);this.releaseLock=RELEASE_LOCK_SECONDS;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
+    else if(decision.jump==='ground'){this.vy=JUMP_UPWARD_VELOCITY;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
+    // Walking outward under an exposed edge releases the grip automatically.
+    // A stationary grip never launches; explicit jump/drop releases keep their behavior above.
+    if(this.ceiling&&dir){
+      const corner=findCeilingCornerLaunch(this.px,this.py,PW,solids,dir*190);
+      if(corner){
+        this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);
+        this.vy=CEILING_CORNER_UPWARD_VELOCITY;this.ceiling=false;
+        this.cornerEscapeRoof=corner.roof as Platform;this.cornerEscapeDirection=corner.direction;
+        this.releaseLock=RELEASE_LOCK_SECONDS;
+        this.swingEffects.trigger({x:this.px+PW/2,y:this.py+PH/2},corner.direction);
+      }
+    }
     if(this.ceiling){this.ceilingGripTime+=dt;this.vy=0;this.vx=dir*190;}else if(this.wall){this.vx=0;this.vy=Math.max(0,Math.min(this.vy,35));}else{
       this.vx=horizontalVelocity(this.vx,dir,this.grounded,this.sliding,dt,runningSpeed(this.runTime));
-      this.vy=Math.min(this.vy+1550*dt,850);if(!jump&&this.vy< -180)this.vy+=1100*dt;
+      this.vy=Math.min(this.vy+1550*dt,850);
+      // Preserve the full corner impulse until its upward arc ends. Jump-release
+      // gravity otherwise cancels much of the launch before the bottle clears the roof.
+      if(!jump&&this.vy< -180&&!(this.cornerEscapeRoof&&this.vy<0))this.vy+=1100*dt;
     }
     if(dir)this.facing=dir;const oldX=this.px,oldY=this.py;this.px+=this.vx*dt;
     this.cameraOffset=smoothCameraOffset(this.cameraOffset,this.facing,dt);
     this.cameras.main.setFollowOffset(this.cameraOffset,0);
     let blocked=false;
-    for(const p of solids)if(overlap(this.px,this.py,PW,bh,p)){if(this.vx>0&&oldX+PW<=p.x+3)this.px=p.x-PW;else if(this.vx<0&&oldX>=p.x+p.w-3)this.px=p.x+p.w;this.vx=0;blocked=true;}
+    for(const p of solids)if(overlap(this.px,this.py,PW,bh,p)){
+      if(this.cornerEscapeRoof&&p===this.cornerEscapeRoof&&shouldSkipCeilingCornerRoofCollision(this.px,PW,this.vx,this.vy,this.cornerEscapeDirection as -1|1,p,this.cornerEscapeRoof))continue;
+      if(this.vx>0&&oldX+PW<=p.x+3)this.px=p.x-PW;else if(this.vx<0&&oldX>=p.x+p.w-3)this.px=p.x+p.w;this.vx=0;blocked=true;
+    }
     this.py+=this.vy*dt;this.grounded=false;
-    for(const p of solids)if(overlap(this.px,this.py,PW,bh,p)){if(this.vy>0&&oldY+bh<=p.y+4){this.py=p.y-bh;this.vy=0;this.grounded=true;}else if(this.vy<0&&oldY>=p.y+p.h-4){this.py=p.y+p.h;this.vy=0;}}
+    for(const p of solids)if(overlap(this.px,this.py,PW,bh,p)){if(this.vy<0&&p===this.cornerEscapeRoof&&shouldSkipCeilingCornerRoofCollision(this.px,PW,this.vx,this.vy,this.cornerEscapeDirection as -1|1,p,this.cornerEscapeRoof))continue;if(this.vy>0&&oldY+bh<=p.y+4){this.py=p.y-bh;this.vy=0;this.grounded=true;}else if(this.vy<0&&oldY>=p.y+p.h-4){this.py=p.y+p.h;this.vy=0;}}
+    if(this.cornerEscapeRoof&&this.vy>=0){this.cornerEscapeRoof=undefined;this.cornerEscapeDirection=0;}
     if(this.py>720)this.respawn();
     for(const p of this.level.platforms){
       if(p.kind==='hazard'&&overlap(this.px,this.py,PW,bh,p))this.respawn();
@@ -194,8 +251,36 @@ export class GameScene extends Phaser.Scene {
     const module=this.level.modules[moduleIndex];
     this.moduleDebug.setText(module?`MODUL ${moduleIndex+1}/${this.level.modules.length} · ${module.name} · x ${Math.floor(this.px-module.startX)}/${module.endX-module.startX}`:'STARTBEREICH');
   }
-  private respawn():void{this.swingEffects.reset();this.swingFrame=this.swingEffects.update(0,{x:this.checkpoint.x,y:this.checkpoint.y});this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.deaths++;this.px=this.checkpoint.x;this.py=this.checkpoint.y;this.vx=this.vy=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.lean=0;}
-  private win():void{this.mode='won';if(this.multiplayer)this.publishLocalState(true);this.cameras.main.stopFollow();this.gfx.clear();drawFactoryEnvironment(this.gfx,this.level,this.cameras.main);if(this.multiplayer)this.drawRemotePlayers();this.clearUI();this.ui.add(this.text(W/2,190,'LEVEL GESCHAFFT!',38,'#ffd66b'));this.ui.add(this.text(W/2,260,`Zeit ${this.elapsed.toFixed(1)} s • Neustarts ${this.deaths}`,20));this.ui.add(this.text(W/2,330,`Seed ${this.seed.toString(16).toUpperCase()}`,16,'#9fb8ce'));if(this.multiplayer){this.ensureRaceBanner();this.ui.add(this.text(W/2,390,'Die anderen spielen weiter. Zurück zum Menü über die Shell.',15,'#b4c4d1'));}else{const again=this.text(W/2,420,'NOCH EIN RUN ↻',22,'#101b2c').setPadding(20,12,20,12).setBackgroundColor('#ffd66b').setInteractive();again.on('pointerdown',()=>{this.seed=Math.floor(Math.random()*0x7fffffff);this.startGame();});this.ui.add(again);this.ui.add(this.text(W/2,490,'ENTER oder SPACE zum Neustart',14,'#b4c4d1'));}}
+  private respawn():void{this.swingEffects.reset();this.swingFrame=this.swingEffects.update(0,{x:this.checkpoint.x,y:this.checkpoint.y});this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.deaths++;this.px=this.checkpoint.x;this.py=this.checkpoint.y;this.vx=this.vy=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.cornerEscapeRoof=undefined;this.cornerEscapeDirection=0;this.lean=0;}
+  private win():void{
+    this.mode='won';if(this.multiplayer)this.publishLocalState(true);
+    this.cameras.main.stopFollow();this.gfx.clear();drawFactoryEnvironment(this.gfx,this.level,this.cameras.main);if(this.multiplayer)this.drawRemotePlayers();
+    this.clearUI();
+    // A full-screen scrim and solid plate keep the finish hierarchy readable over the factory.
+    const shade=this.add.graphics();shade.fillStyle(0x07121d,.58);shade.fillRect(0,0,W,H);this.ui.add(shade);
+    const plate=this.add.graphics();plate.fillStyle(0x142536,.97);plate.fillRoundedRect(W/2-270,126,540,374,20);plate.lineStyle(2,0xd19a53,1);plate.strokeRoundedRect(W/2-270,126,540,374,20);plate.fillStyle(0xffd66b,1);plate.fillRoundedRect(W/2-88,142,176,5,2);this.ui.add(plate);
+    this.ui.add(this.text(W/2,184,'LEVEL GESCHAFFT!',34,'#ffd66b'));
+    this.ui.add(this.text(W/2,235,`ZEIT  ${this.elapsed.toFixed(1)} s     ·     NEUSTARTS  ${this.deaths}`,17,'#ffffff'));
+    this.ui.add(this.text(W/2,270,`SEED  ${this.seed.toString(16).toUpperCase()}`,14,'#b9c9d8'));
+    if(this.multiplayer){
+      this.ensureRaceBanner();
+      this.resultStatus=this.text(W/2,330,'',20,'#ffffff');this.ui.add(this.resultStatus);
+      this.updateResultOverlay();
+    }else{
+      const again=this.text(W/2,375,'NOCH EIN RUN  ↻',21,'#172536').setPadding(20,12,20,12).setBackgroundColor('#ffd66b').setInteractive({useHandCursor:true});
+      again.on('pointerdown',()=>{if(this.mode!=='won'||this.multiplayer)return;this.seed=Math.floor(Math.random()*0x7fffffff);this.startGame();});this.ui.add(again);
+      this.ui.add(this.text(W/2,435,'ENTER oder SPACE zum Neustart',14,'#d4e0e9'));
+    }
+  }
+  private updateResultOverlay():void{
+    if(this.mode!=='won'||!this.multiplayer||!this.resultStatus?.active)return;
+    this.resultStatus.setText(this.raceComplete?'ALLE SPIELER IM ZIEL':'WARTEN AUF DIE ANDEREN …');
+    if(!this.raceComplete||this.returnButton?.active)return;
+    if(!this.multiplayer.onReturnToLobby){this.resultStatus.setText('ALLE SPIELER IM ZIEL');return;}
+    const button=this.text(W/2,390,'ZURÜCK ZUR LOBBY',20,'#172536').setPadding(22,12,22,12).setBackgroundColor('#ffd66b').setInteractive({useHandCursor:true});
+    this.returnButton=button;this.ui.add(button);
+    button.on('pointerdown',()=>{if(!button.active||this.mode!=='won'||!this.raceComplete)return;this.multiplayer?.onReturnToLobby?.();});
+  }
   private updateDust(dt:number,bh:number):void {
     for(const puff of this.dust){puff.age+=dt;puff.x+=puff.vx*dt;puff.y-=10*dt;}
     this.dust=this.dust.filter(puff=>puff.age<puff.life);

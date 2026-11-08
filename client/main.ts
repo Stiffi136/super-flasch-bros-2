@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { GameScene } from './scene';
 
-export type GameOptions = { bottleIndex?: number; seed?: number; startImmediately?: boolean };
+export type GameOptions = { bottleIndex?: number; seed?: number; startImmediately?: boolean; multiplayerCountdown?: boolean };
 export type MountedGame = {
   game: Phaser.Game;
   scene: GameScene;

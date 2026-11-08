@@ -3,9 +3,9 @@ import { randomInt, randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 
 export type Bottle = 0 | 1 | 2;
-type Player = { id: string; name: string; bottle: Bottle; ws: WebSocket; lastSeq: number };
-type Room = { code: string; hostId: string; started: boolean; seed: number; moduleHash: string; winnerId?: string; players: Map<string, Player> };
-type ServerOptions = { port?: number; host?: string; allowedOrigins?: string[]; maxConnections?: number; maxRooms?: number; idleTimeoutMs?: number };
+type Player = { id: string; name: string; bottle: Bottle; ws: WebSocket; lastSeq: number; finished: boolean };
+type Room = { code: string; hostId: string; started: boolean; go: boolean; seed: number; raceId: string; moduleHash: string; winnerId?: string; raceComplete: boolean; players: Map<string, Player> };
+type ServerOptions = { port?: number; host?: string; allowedOrigins?: string[]; maxConnections?: number; maxRooms?: number; idleTimeoutMs?: number; countdownMs?: number };
 const MAX_CONNECTIONS = 256;
 const MAX_ROOMS = 128;
 const IDLE_UNJOINED_TIMEOUT_MS = 15_000;
@@ -13,7 +13,7 @@ const MAX_PLAYERS = 8;
 const MAX_NAME_LENGTH = 20;
 const MAX_MODULE_HASH_LENGTH = 256;
 const MAX_RATE = 30;
-const STATE_FIELDS = ["seq", "x", "y", "vx", "vy", "grounded", "wall", "ceiling", "sliding", "facing", "lean", "runPhase", "deaths", "finished"] as const;
+const STATE_FIELDS = ["raceId", "seq", "x", "y", "vx", "vy", "grounded", "wall", "ceiling", "sliding", "facing", "lean", "runPhase", "deaths", "finished"] as const;
 const NUMERIC_LIMITS: Record<string, [number, number]> = {
   x: [-1_000_000, 1_000_000], y: [-1_000_000, 1_000_000], vx: [-100_000, 100_000], vy: [-100_000, 100_000],
   wall: [-1, 1], facing: [-1, 1], lean: [-Math.PI * 2, Math.PI * 2], runPhase: [-1_000_000, 1_000_000], deaths: [0, 1_000_000],
@@ -35,6 +35,7 @@ function sanitizeName(value: string): string {
 }
 function validState(value: Record<string, unknown>): boolean {
   if (!hasOnlyKeys(value, ["type", ...STATE_FIELDS]) || STATE_FIELDS.some((key) => !(key in value))) return false;
+  if (typeof value.raceId !== "string" || value.raceId.length > 80) return false;
   if (!Number.isSafeInteger(value.seq) || (value.seq as number) < 0) return false;
   for (const [key, [min, max]] of Object.entries(NUMERIC_LIMITS)) {
     const number = value[key];
@@ -60,6 +61,9 @@ export function createGameServer(options: ServerOptions = {}) {
   const maxConnections = options.maxConnections ?? MAX_CONNECTIONS;
   const maxRooms = options.maxRooms ?? MAX_ROOMS;
   const idleTimeoutMs = options.idleTimeoutMs ?? IDLE_UNJOINED_TIMEOUT_MS;
+  const countdownMs = options.countdownMs ?? 3_000;
+  if (!Number.isSafeInteger(countdownMs) || countdownMs < 0) throw new TypeError("countdownMs must be a non-negative safe integer.");
+  const countdownTimers = new Map<Room, ReturnType<typeof setTimeout>>();
   const allowedOrigins = new Set(options.allowedOrigins ?? (process.env.ORIGIN_ALLOWLIST ?? DEFAULT_ORIGINS.join(",")).split(",").map((s) => s.trim()).filter(Boolean));
   const server: Server = createServer((req, res) => {
     if (req.url === "/health" && req.method === "GET") {
@@ -73,22 +77,33 @@ export function createGameServer(options: ServerOptions = {}) {
   const players = (room: Room) => [...room.players.values()].map(({ id, name, bottle }) => ({ id, name, bottle }));
   const broadcast = (room: Room, message: unknown) => { for (const p of room.players.values()) send(p.ws, message); };
   const lobby = (room: Room) => broadcast(room, { type: "lobby", code: room.code, hostId: room.hostId, seed: room.seed, players: players(room) });
+  const completeRaceIfReady = (room: Room) => {
+    if (!room.go || room.raceComplete || !room.players.size || [...room.players.values()].some((p) => !p.finished)) return;
+    room.raceComplete = true;
+    broadcast(room, { type: "race-complete", winnerId: room.winnerId ?? null });
+  };
   const disconnect = (ws: WebSocket) => {
     const entry = connections.get(ws);
     if (!entry) return;
     connections.delete(ws);
     const { room, player } = entry;
     room.players.delete(player.id);
-    if (!room.players.size) { rooms.delete(room.code); return; }
+    if (!room.players.size) {
+      rooms.delete(room.code);
+      const timer = countdownTimers.get(room);
+      if (timer) { clearTimeout(timer); countdownTimers.delete(room); }
+      return;
+    }
     if (room.hostId === player.id) {
       room.hostId = room.players.keys().next().value as string;
       broadcast(room, { type: "host-changed", hostId: room.hostId });
     }
     broadcast(room, { type: "player-left", id: player.id });
     lobby(room);
+    completeRaceIfReady(room);
   };
   const attach = (ws: WebSocket, room: Room, name: string, bottle: Bottle) => {
-    const player: Player = { id: randomUUID(), name: sanitizeName(name), bottle, ws, lastSeq: -1 };
+    const player: Player = { id: randomUUID(), name: sanitizeName(name), bottle, ws, lastSeq: -1, finished: false };
     room.players.set(player.id, player);
     if (!room.hostId) room.hostId = player.id;
     connections.set(ws, { room, player });
@@ -122,7 +137,7 @@ export function createGameServer(options: ServerOptions = {}) {
       if (message.type === "create") {
         if (current || !hasOnlyKeys(message, ["type", "name", "bottle", "moduleHash"]) || !validName(message.name) || !validBottle(message.bottle) || ("moduleHash" in message && !validModuleHash(message.moduleHash))) { error(ws, "Invalid create message."); return; }
         if (rooms.size >= maxRooms) { error(ws, "Server room limit reached."); return; }
-        const room: Room = { code: codeFor(rooms), hostId: "", started: false, seed: 0, moduleHash: message.moduleHash === undefined ? "" : message.moduleHash as string, players: new Map() };
+        const room: Room = { code: codeFor(rooms), hostId: "", started: false, go: false, seed: 0, raceId: "", moduleHash: message.moduleHash === undefined ? "" : message.moduleHash as string, raceComplete: false, players: new Map() };
         rooms.set(room.code, room); attach(ws, room, message.name, message.bottle); return;
       }
       if (message.type === "join") {
@@ -141,20 +156,40 @@ export function createGameServer(options: ServerOptions = {}) {
         if (player.id !== room.hostId) { error(ws, "Only the host can start."); return; }
         if (room.started) { error(ws, "Lobby has already started."); return; }
         if (room.players.size < 2) { error(ws, "At least 2 players are required to start."); return; }
-        room.started = true; room.seed = randomInt(0, 0x1_0000_0000);
-        broadcast(room, { type: "started", seed: room.seed }); return;
+        room.started = true; room.seed = randomInt(0, 0x1_0000_0000); room.raceId = randomUUID();
+        broadcast(room, { type: "started", seed: room.seed, countdownMs, raceId: room.raceId });
+        const timer = setTimeout(() => {
+          countdownTimers.delete(room);
+          if (rooms.get(room.code) !== room || !room.players.size) return;
+          room.go = true;
+          broadcast(room, { type: "go" });
+        }, countdownMs);
+        countdownTimers.set(room, timer);
+        return;
+      }
+      if (message.type === "return-to-lobby") {
+        if (!hasOnlyKeys(message, ["type"])) { error(ws, "Invalid return-to-lobby message."); return; }
+        if (!room.raceComplete) { error(ws, "Race is not complete."); return; }
+        room.started = false; room.go = false; room.seed = 0; room.raceId = ""; room.winnerId = undefined; room.raceComplete = false;
+        for (const member of room.players.values()) { member.lastSeq = -1; member.finished = false; }
+        broadcast(room, { type: "lobby-reset", code: room.code, hostId: room.hostId, seed: room.seed, players: players(room) });
+        return;
       }
       if (message.type === "state") {
-        if (!room.started || !validState(message)) { error(ws, "Invalid state message or game has not started."); return; }
+        if (!validState(message)) { error(ws, "Invalid state message or game has not started."); return; }
+        if (message.raceId !== room.raceId || room.raceComplete || player.finished) return;
+        if (!room.go) { error(ws, "Invalid state message or game has not started."); return; }
         const seq = message.seq as number;
         if (seq <= player.lastSeq) { error(ws, "State sequence must increase."); return; }
         player.lastSeq = seq;
+        if (message.finished === true) player.finished = true;
         if (message.finished === true && !room.winnerId) {
           room.winnerId = player.id;
           broadcast(room, { type: "winner", id: player.id });
         }
         const relayed = { type: "state", id: player.id, ...Object.fromEntries(STATE_FIELDS.map((key) => [key, message[key]])) };
         for (const other of room.players.values()) if (other.id !== player.id) send(other.ws, relayed);
+        completeRaceIfReady(room);
         return;
       }
       error(ws, "Unknown message type.");
@@ -173,6 +208,8 @@ export function createGameServer(options: ServerOptions = {}) {
       return new Promise<void>((resolve) => server.listen(port, host, () => resolve()));
     },
     close() {
+      for (const timer of countdownTimers.values()) clearTimeout(timer);
+      countdownTimers.clear();
       for (const ws of wss.clients) ws.terminate();
       return new Promise<void>((resolve, reject) => { wss.close(); server.close((err) => err ? reject(err) : resolve()); });
     },
