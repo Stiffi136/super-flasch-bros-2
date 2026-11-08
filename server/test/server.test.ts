@@ -78,6 +78,47 @@ describe("multiplayer server", () => {
     guest.close(); late.close();
   });
 
+  it("rejects module-set mismatches in either join direction", async () => {
+    const url = await startApp();
+    const hostHasHash = await connect(url), guestWithoutHash = await connect(url);
+    send(hostHasHash, { type: "create", name: "Has hash", bottle: 0, moduleHash: "modules-a" });
+    const firstLobby = await awaitType(hostHasHash, "welcome");
+    send(guestWithoutHash, { type: "join", code: firstLobby.code, name: "No hash", bottle: 1 });
+    expect((await awaitType(guestWithoutHash, "error")).message).toContain("Module set mismatch");
+
+    const hostWithoutHash = await connect(url), guestHasHash = await connect(url);
+    send(hostWithoutHash, { type: "create", name: "No hash", bottle: 0 });
+    const secondLobby = await awaitType(hostWithoutHash, "welcome");
+    send(guestHasHash, { type: "join", code: secondLobby.code, name: "Has hash", bottle: 1, moduleHash: "modules-a" });
+    expect((await awaitType(guestHasHash, "error")).message).toContain("Module set mismatch");
+    hostHasHash.close(); guestWithoutHash.close(); hostWithoutHash.close(); guestHasHash.close();
+  });
+
+  it("allows matching module hashes and treats missing and empty hashes as equal", async () => {
+    const url = await startApp();
+    const host = await connect(url), matching = await connect(url);
+    send(host, { type: "create", name: "Host", bottle: 0, moduleHash: "modules-a" });
+    const lobby = await awaitType(host, "welcome");
+    send(matching, { type: "join", code: lobby.code, name: "Match", bottle: 1, moduleHash: "modules-a" });
+    expect((await awaitType(matching, "welcome")).code).toBe(lobby.code);
+    await awaitType(host, "lobby");
+
+    const oldHost = await connect(url), emptyHashGuest = await connect(url);
+    send(oldHost, { type: "create", name: "Old client", bottle: 0 });
+    const oldLobby = await awaitType(oldHost, "welcome");
+    send(emptyHashGuest, { type: "join", code: oldLobby.code, name: "Empty", bottle: 1, moduleHash: "" });
+    expect((await awaitType(emptyHashGuest, "welcome")).code).toBe(oldLobby.code);
+    host.close(); matching.close(); oldHost.close(); emptyHashGuest.close();
+  });
+
+  it("rejects invalid module hash values", async () => {
+    const url = await startApp();
+    const client = await connect(url);
+    send(client, { type: "create", name: "Host", bottle: 0, moduleHash: "not safe" });
+    expect((await awaitType(client, "error")).message).toContain("Invalid create message");
+    client.close();
+  });
+
   it("serves the health endpoint", async () => {
     const wsUrl = await startApp();
     const response = await fetch(wsUrl.replace("ws://", "http://").replace("/ws", "/health"));

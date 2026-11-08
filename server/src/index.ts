@@ -4,13 +4,14 @@ import { WebSocket, WebSocketServer } from "ws";
 
 export type Bottle = 0 | 1 | 2;
 type Player = { id: string; name: string; bottle: Bottle; ws: WebSocket; lastSeq: number };
-type Room = { code: string; hostId: string; started: boolean; seed: number; winnerId?: string; players: Map<string, Player> };
+type Room = { code: string; hostId: string; started: boolean; seed: number; moduleHash: string; winnerId?: string; players: Map<string, Player> };
 type ServerOptions = { port?: number; host?: string; allowedOrigins?: string[]; maxConnections?: number; maxRooms?: number; idleTimeoutMs?: number };
 const MAX_CONNECTIONS = 256;
 const MAX_ROOMS = 128;
 const IDLE_UNJOINED_TIMEOUT_MS = 15_000;
 const MAX_PLAYERS = 8;
 const MAX_NAME_LENGTH = 20;
+const MAX_MODULE_HASH_LENGTH = 256;
 const MAX_RATE = 30;
 const STATE_FIELDS = ["seq", "x", "y", "vx", "vy", "grounded", "wall", "ceiling", "sliding", "facing", "lean", "runPhase", "deaths", "finished"] as const;
 const NUMERIC_LIMITS: Record<string, [number, number]> = {
@@ -27,6 +28,7 @@ function hasOnlyKeys(value: Record<string, unknown>, allowed: string[]): boolean
 }
 function validBottle(value: unknown): value is Bottle { return Number.isInteger(value) && (value === 0 || value === 1 || value === 2); }
 function validName(value: unknown): value is string { return typeof value === "string" && value.trim().length > 0 && value.length <= 64; }
+function validModuleHash(value: unknown): value is string { return typeof value === "string" && value.length <= MAX_MODULE_HASH_LENGTH && /^[A-Za-z0-9._:-]*$/.test(value); }
 function sanitizeName(value: string): string {
   const cleaned = value.normalize("NFKC").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").trim();
   return [...cleaned].slice(0, MAX_NAME_LENGTH).join("") || "Player";
@@ -118,16 +120,17 @@ export function createGameServer(options: ServerOptions = {}) {
       if (!record(message) || typeof message.type !== "string") { error(ws, "Message must be an object with a type."); return; }
       const current = connections.get(ws);
       if (message.type === "create") {
-        if (current || !hasOnlyKeys(message, ["type", "name", "bottle"]) || !validName(message.name) || !validBottle(message.bottle)) { error(ws, "Invalid create message."); return; }
+        if (current || !hasOnlyKeys(message, ["type", "name", "bottle", "moduleHash"]) || !validName(message.name) || !validBottle(message.bottle) || ("moduleHash" in message && !validModuleHash(message.moduleHash))) { error(ws, "Invalid create message."); return; }
         if (rooms.size >= maxRooms) { error(ws, "Server room limit reached."); return; }
-        const room: Room = { code: codeFor(rooms), hostId: "", started: false, seed: 0, players: new Map() };
+        const room: Room = { code: codeFor(rooms), hostId: "", started: false, seed: 0, moduleHash: message.moduleHash === undefined ? "" : message.moduleHash as string, players: new Map() };
         rooms.set(room.code, room); attach(ws, room, message.name, message.bottle); return;
       }
       if (message.type === "join") {
-        if (current || !hasOnlyKeys(message, ["type", "code", "name", "bottle"]) || typeof message.code !== "string" || !/^[A-HJ-NP-Z2-9]{6}$/.test(message.code) || !validName(message.name) || !validBottle(message.bottle)) { error(ws, "Invalid join message."); return; }
+        if (current || !hasOnlyKeys(message, ["type", "code", "name", "bottle", "moduleHash"]) || typeof message.code !== "string" || !/^[A-HJ-NP-Z2-9]{6}$/.test(message.code) || !validName(message.name) || !validBottle(message.bottle) || ("moduleHash" in message && !validModuleHash(message.moduleHash))) { error(ws, "Invalid join message."); return; }
         const room = rooms.get(message.code);
         if (!room) { error(ws, "Lobby does not exist."); return; }
         if (room.started) { error(ws, "Lobby has already started."); return; }
+        if (room.moduleHash !== (message.moduleHash ?? "")) { error(ws, "Module set mismatch: this lobby uses a different custom module set."); return; }
         if (room.players.size >= MAX_PLAYERS) { error(ws, "Lobby is full."); return; }
         attach(ws, room, message.name, message.bottle); return;
       }

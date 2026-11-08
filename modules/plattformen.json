@@ -1,0 +1,30 @@
+{
+  "format": "super-flasch-module",
+  "version": 1,
+  "id": "c1fb4ce1-b9bc-40a6-b743-a434ccdac243",
+  "name": "plattformen",
+  "width": 840,
+  "platforms": [
+    {
+      "kind": "solid",
+      "x": 120,
+      "y": -96,
+      "w": 120,
+      "h": 28
+    },
+    {
+      "kind": "solid",
+      "x": 360,
+      "y": -144,
+      "w": 120,
+      "h": 28
+    },
+    {
+      "kind": "solid",
+      "x": 600,
+      "y": -192,
+      "w": 120,
+      "h": 28
+    }
+  ]
+}

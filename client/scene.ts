@@ -6,6 +6,7 @@ import { checkpointSpawn } from '../shared/checkpoint';
 import { drawFactoryEnvironment } from './factory';
 import { createControlHints, createSpeedometer } from './hud';
 import { SnapshotInterpolator } from './interpolation';
+import { customModules } from './custom-modules';
 
 type Mode = 'menu' | 'play' | 'won';
 export type MultiplayerState = {seq:number;x:number;y:number;vx:number;vy:number;grounded:boolean;wall:number;ceiling:boolean;sliding:boolean;facing:number;lean:number;runPhase:number;deaths:number;finished:boolean};
@@ -93,7 +94,7 @@ export class GameScene extends Phaser.Scene {
   }
   private select(d:number):void{this.choice=((this.choice+d+3)%3) as BottleIndex;this.drawMenu();}
   private startGame():void {
-    this.mode='play';this.level=generateLevel(this.seed);this.px=this.level.spawn.x;this.py=this.level.spawn.y;this.vx=this.vy=0;this.checkpoint={...this.level.spawn};this.activeCheckpoint=undefined;this.deaths=0;this.elapsed=0;this.accumulator=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.lean=0;this.runPhase=0;this.lastJump=false;this.clearUI();
+    this.mode='play';this.level=generateLevel(this.seed,customModules);this.px=this.level.spawn.x;this.py=this.level.spawn.y;this.vx=this.vy=0;this.checkpoint={...this.level.spawn};this.activeCheckpoint=undefined;this.deaths=0;this.elapsed=0;this.accumulator=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.lean=0;this.runPhase=0;this.lastJump=false;this.clearUI();
     this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.gfx.clear();
     this.cameras.main.setBounds(-180,0,this.level.width+250,720);
     if (!this.followTarget || !this.followTarget.active) this.followTarget=this.add.zone(this.px,this.py,1,1);

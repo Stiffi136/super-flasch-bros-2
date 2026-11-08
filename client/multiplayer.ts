@@ -36,11 +36,17 @@ export type MultiplayerCallbacks = {
 export type MultiplayerOptions = {
   url: string;
   callbacks?: MultiplayerCallbacks;
+  /** Optional exact identifier for the custom module set used by this client. */
+  moduleHash?: string;
   /** Injection point for tests. Defaults to the browser WebSocket implementation. */
   WebSocketCtor?: new (url: string) => WebSocket;
 };
 
 const STATE_KEYS = ['seq', 'x', 'y', 'vx', 'vy', 'grounded', 'wall', 'ceiling', 'sliding', 'facing', 'lean', 'runPhase', 'deaths', 'finished'] as const;
+const MAX_MODULE_HASH_LENGTH = 256;
+function validModuleHash(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= MAX_MODULE_HASH_LENGTH && /^[A-Za-z0-9._:-]*$/.test(value);
+}
 const own = (value: object, key: string) => Object.prototype.hasOwnProperty.call(value, key);
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -86,10 +92,13 @@ export class MultiplayerClient {
   readonly socket: WebSocket;
   readonly callbacks: MultiplayerCallbacks;
   private readonly lastSeqByPlayer = new Map<string, number>();
+  private readonly moduleHash?: string;
   private closed = false;
 
   constructor(options: MultiplayerOptions) {
     this.callbacks = options.callbacks ?? {};
+    if (options.moduleHash !== undefined && !validModuleHash(options.moduleHash)) throw new TypeError('moduleHash must be a safe string of at most 256 characters.');
+    this.moduleHash = options.moduleHash;
     const url = validateUrl(options.url);
     const Socket = options.WebSocketCtor ?? globalThis.WebSocket;
     if (!Socket) throw new Error('WebSocket is not available in this environment.');
@@ -104,11 +113,11 @@ export class MultiplayerClient {
   }
 
   create(name: string, bottle: number): void {
-    this.send({ type: 'create', name, bottle });
+    this.send({ type: 'create', name, bottle, ...(this.moduleHash === undefined ? {} : { moduleHash: this.moduleHash }) });
   }
 
   join(code: string, name: string, bottle: number): void {
-    this.send({ type: 'join', code, name, bottle });
+    this.send({ type: 'join', code, name, bottle, ...(this.moduleHash === undefined ? {} : { moduleHash: this.moduleHash }) });
   }
 
   start(): void {

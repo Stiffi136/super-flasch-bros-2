@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { decideGrab, horizontalVelocity, RELEASE_LOCK_SECONDS, WALL_JUMP_LOCK_SECONDS } from './movement';
 import { generateLevel, type Platform } from './game';
+import { MODULE_FORMAT, MODULE_VERSION, type ModuleDefinition } from './module-format';
 
 /**
  * Independent fixed-step trajectory harness. It duplicates the relevant movement
@@ -105,6 +106,10 @@ function modules(level: ReturnType<typeof generateLevel>) {
 }
 
 const floor = (x: number, y: number, w: number): Platform => ({ x, y, w, h: 120, kind: 'solid' });
+const routeFixture: ModuleDefinition = {
+  format: MODULE_FORMAT, version: MODULE_VERSION, id: 'route-fixture', name: 'Route fixture', width: 840,
+  platforms: [{ kind: 'solid', x: 400, y: -40, w: 28, h: 40 }],
+};
 
 describe('independent fixed-step feature checks', () => {
   it('crosses a representative 156-unit floor gap and lands on the exit runway', () => {
@@ -137,10 +142,9 @@ describe('independent fixed-step feature checks', () => {
 describe('generated module route replay', () => {
   it('reaches the generated goal across seeded modules and transitions', () => {
     const seeds = [1, 2, 42, 2025, 0x5eed1234];
-    const seenProfiles = new Set<string>();
     for (const seed of seeds) {
-      const level = generateLevel(seed), courseModules = modules(level);
-      courseModules.forEach(m => seenProfiles.add(m.profile));
+      const level = generateLevel(seed, [routeFixture]), courseModules = modules(level);
+      expect(level.modules.some(m => m.name === routeFixture.name)).toBe(true);
       const result = runWithSearch(level);
       const furthest = Math.max(...result.history.map(s => s.x));
       const failedModule = courseModules.find(m => furthest < m.end) ?? courseModules.at(-1)!;
@@ -151,6 +155,5 @@ describe('generated module route replay', () => {
         expect(courseModules[i].end).toBe(courseModules[i + 1].x);
       }
     }
-    expect(seenProfiles.size, `distinct generated obstacle profiles: ${[...seenProfiles].join(', ')}`).toBeGreaterThanOrEqual(4);
   });
 });

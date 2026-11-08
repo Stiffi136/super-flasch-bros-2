@@ -1,0 +1,37 @@
+{
+  "format": "super-flasch-module",
+  "version": 1,
+  "id": "75b64132-377a-4461-bd0e-84b88230f3bc",
+  "name": "two-platforms",
+  "width": 840,
+  "platforms": [
+    {
+      "kind": "solid",
+      "x": 120,
+      "y": -120,
+      "w": 120,
+      "h": 28
+    },
+    {
+      "kind": "grip",
+      "x": 120,
+      "y": -96,
+      "w": 120,
+      "h": 12
+    },
+    {
+      "kind": "solid",
+      "x": 576,
+      "y": -120,
+      "w": 120,
+      "h": 28
+    },
+    {
+      "kind": "grip",
+      "x": 576,
+      "y": -96,
+      "w": 120,
+      "h": 12
+    }
+  ]
+}

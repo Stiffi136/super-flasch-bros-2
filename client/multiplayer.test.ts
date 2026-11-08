@@ -37,6 +37,23 @@ describe('MultiplayerClient', () => {
     ]);
   });
 
+  it('includes an optional module hash in create and join messages', () => {
+    const client = new MultiplayerClient({ url: 'ws://localhost:8080/ws', moduleHash: 'sha256:abc123', WebSocketCtor: FakeSocket as unknown as new (url: string) => WebSocket });
+    const socket = FakeSocket.instance!;
+    socket.open();
+    client.create('Ada', 2);
+    client.join('ABC234', 'Lin', 1);
+    expect(socket.sent.map((item) => JSON.parse(item))).toEqual([
+      { type: 'create', name: 'Ada', bottle: 2, moduleHash: 'sha256:abc123' },
+      { type: 'join', code: 'ABC234', name: 'Lin', bottle: 1, moduleHash: 'sha256:abc123' },
+    ]);
+  });
+
+  it('rejects unsafe or oversized module hashes', () => {
+    expect(() => new MultiplayerClient({ url: 'ws://localhost:8080/ws', moduleHash: 'bad hash', WebSocketCtor: FakeSocket as unknown as new (url: string) => WebSocket })).toThrow(TypeError);
+    expect(() => new MultiplayerClient({ url: 'ws://localhost:8080/ws', moduleHash: 'x'.repeat(257), WebSocketCtor: FakeSocket as unknown as new (url: string) => WebSocket })).toThrow(TypeError);
+  });
+
   it('dispatches validated server messages and ignores stale per-player states', () => {
     const onWelcome = vi.fn(), onLobby = vi.fn(), onStarted = vi.fn(), onState = vi.fn();
     const onServerError = vi.fn(), onPlayerLeft = vi.fn(), onHostChanged = vi.fn(), onWinner = vi.fn(), onError = vi.fn();

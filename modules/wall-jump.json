@@ -1,0 +1,37 @@
+{
+  "format": "super-flasch-module",
+  "version": 1,
+  "id": "74f14d90-9cc5-4b74-bf45-2f72b862f884",
+  "name": "wall-jump",
+  "width": 840,
+  "platforms": [
+    {
+      "kind": "solid",
+      "x": 288,
+      "y": -288,
+      "w": 48,
+      "h": 144
+    },
+    {
+      "kind": "grip",
+      "x": 334,
+      "y": -288,
+      "w": 12,
+      "h": 142
+    },
+    {
+      "kind": "solid",
+      "x": 432,
+      "y": -120,
+      "w": 48,
+      "h": 120
+    },
+    {
+      "kind": "grip",
+      "x": 420,
+      "y": -120,
+      "w": 12,
+      "h": 120
+    }
+  ]
+}

@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { generateLevel } from './game';
 import { checkpointSpawn } from './checkpoint';
+import type { ModuleDefinition } from './module-format';
+
+const module: ModuleDefinition = {format:'super-flasch-module',version:1,id:'checkpoint-test',name:'Checkpoint-Test',width:840,platforms:[]};
 
 describe('checkpoint spawn', () => {
   it('lands on a supporting runway for each generated checkpoint', () => {
     for (let seed = 0; seed < 100; seed++) {
-      const level = generateLevel(seed);
+      const level = generateLevel(seed, [module]);
       const solids = level.platforms.filter(p => p.kind === 'solid');
       for (const cp of level.platforms.filter(p => p.kind === 'checkpoint')) {
         const spawn = checkpointSpawn(cp, solids, 25, 42);

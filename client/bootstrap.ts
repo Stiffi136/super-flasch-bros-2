@@ -1,7 +1,8 @@
 import './style.css';
 import { renderShell, type BottleId } from './shell';
-import { mountGame, type MountedGame } from './main';
+import type { MountedGame } from './main';
 import { MultiplayerClient, type PlayerInfo, type RemoteState } from './multiplayer';
+
 
 const app = document.querySelector<HTMLElement>('#app');
 if (!app) throw new Error('Die Spieloberfläche konnte nicht geladen werden.');
@@ -9,10 +10,13 @@ let mounted: MountedGame | undefined;
 let network: MultiplayerClient | undefined;
 let selfId = '', hostId = '', lobbyCode = '', players: PlayerInfo[] = [];
 let selectedBottle = 0, inRace = false, intentionalClose = false, ready = false;
+let mountGame: typeof import('./main').mountGame;
+let moduleSetHash: string;
 let queuedStates: RemoteState[] = [], queuedWinner: string | undefined;
 const bottleIndex: Record<BottleId, number> = { amber: 0, mint: 1, berry: 2 };
 const shell = renderShell(app, {
   onStartSingleplayer: (bottle) => {
+    if (!mountGame) { shell.setStatus('Spiel wird noch geladen.', 'error'); return; }
     disconnect(); mounted?.destroy();
     shell.showView('game'); shell.setStatus('');
     mounted = mountGame(shell.gameMount, { bottleIndex: bottleIndex[bottle], startImmediately: true });
@@ -28,6 +32,17 @@ const defaultServer = import.meta.env.VITE_SERVER_URL as string | undefined;
 serverInput.value = defaultServer || ((location.hostname === 'localhost' || location.hostname === '127.0.0.1') ? 'ws://localhost:8080/ws' : '');
 const lobbyMessage = el<HTMLElement>('[data-lobby-message]');
 const startButton = el<HTMLButtonElement>('[data-action="start-race"]');
+
+// Load and validate authored modules before enabling the game. Surface broken
+// module files in the shell instead of leaving the loading screen on an error.
+void Promise.all([import('./main'), import('./custom-modules')]).then(([game, modules]) => {
+  mountGame = game.mountGame;
+  moduleSetHash = modules.moduleSetHash;
+}).catch((error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  shell.setStatus(`Module konnten nicht geladen werden: ${message}`, 'error');
+  shell.root.querySelectorAll<HTMLButtonElement>('button').forEach(button => { button.disabled = true; });
+});
 
 function disconnect(): void {
   const old = network; network = undefined; intentionalClose = true;
@@ -49,11 +64,12 @@ function updateLobby(): void {
     : 'Warte, bis die Lobby-Leitung das Rennen startet.';
 }
 function connect(action: 'create' | 'join', bottle: BottleId, code = ''): void {
+  if (!mountGame) throw new Error('Spiel wird noch geladen.');
   const url = serverInput.value.trim(), name = nameInput.value.trim();
   if (!url) throw new Error('Bitte gib die WebSocket-Adresse des Spielservers ein.');
   if (!name) throw new Error('Bitte gib deinen Namen ein.');
   disconnect(); intentionalClose = false; selectedBottle = bottleIndex[bottle];
-  const client = new MultiplayerClient({ url, callbacks: {
+  const client = new MultiplayerClient({ url, moduleHash: moduleSetHash, callbacks: {
     onOpen: () => { if (network !== client) return; if (action === 'create') client.create(name, selectedBottle); else client.join(code.trim().toUpperCase(), name, selectedBottle); },
     onWelcome: message => {
       if (network !== client) return;
@@ -81,7 +97,7 @@ function connect(action: 'create' | 'join', bottle: BottleId, code = ''): void {
     onState: state => { if (network !== client) return; if (ready) mounted?.scene.updateRemotePlayer(state.id, state); else { queuedStates = queuedStates.filter(s => s.id !== state.id); queuedStates.push(state); } },
     onWinner: id => { if (network !== client) return; if (ready) mounted?.scene.setRaceWinner(id); else queuedWinner = id; },
     onPlayerLeft: id => { if (network !== client) return; players = players.filter(p => p.id !== id); mounted?.scene.removeRemotePlayer(id); if (!inRace) updateLobby(); },
-    onServerError: message => { if (network === client) { shell.setStatus(`Spielserver: ${message}`, 'error'); if (!selfId) { network = undefined; client.close(); } } },
+    onServerError: message => { if (network === client) { shell.setStatus(message.startsWith('Module set mismatch') ? 'Unterschiedliche Modulversionen: Alle Spieler brauchen denselben Spiel-Build mit denselben Modulen.' : `Spielserver: ${message}`, 'error'); if (!selfId) { network = undefined; client.close(); } } },
     onError: error => { if (network === client) shell.setStatus(`Verbindung: ${error.message}`, 'error'); },
     onClose: () => { if (network !== client || intentionalClose) return; network = undefined; if (inRace) mounted?.scene.clearMultiplayer(); shell.setStatus('Die Verbindung zum Spielserver wurde getrennt. Bitte kehre zum Menü zurück.', 'error'); },
   }});
