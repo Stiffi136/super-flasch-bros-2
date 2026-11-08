@@ -6,14 +6,15 @@ import { checkpointSpawn } from '../shared/checkpoint';
 import { drawFactoryEnvironment } from './factory';
 import { createControlHints, createSpeedometer } from './hud';
 import { SnapshotInterpolator } from './interpolation';
+import { CeilingSwingEffects, SwingEffectsFrame } from './swing-effects';
 import { customModules } from './custom-modules';
 import { CAMERA_LOOK_AHEAD, smoothCameraOffset } from './camera';
 
 type Mode = 'menu' | 'play' | 'won';
 export type MultiplayerState = {seq:number;x:number;y:number;vx:number;vy:number;grounded:boolean;wall:number;ceiling:boolean;sliding:boolean;facing:number;lean:number;runPhase:number;deaths:number;finished:boolean};
 type MultiplayerOptions = {players:Array<{id:string;name:string;bottle:number}>;selfId:string;onState:(state:MultiplayerState)=>void};
-type BottlePose = Pick<MultiplayerState,'x'|'y'|'vx'|'grounded'|'wall'|'ceiling'|'sliding'|'facing'|'lean'|'runPhase'> & {bottle:number;animationTime:number;gripMin:number;gripMax:number};
-type RemotePlayer = {id:string;name:string;bottle:number;interpolator:SnapshotInterpolator;label:Phaser.GameObjects.Text};
+type BottlePose = Pick<MultiplayerState,'x'|'y'|'vx'|'grounded'|'wall'|'ceiling'|'sliding'|'facing'|'lean'|'runPhase'> & {bottle:number;animationTime:number;gripMin:number;gripMax:number;swing?:SwingEffectsFrame};
+type RemotePlayer = {id:string;name:string;bottle:number;interpolator:SnapshotInterpolator;label:Phaser.GameObjects.Text;effects:CeilingSwingEffects;lastState?:MultiplayerState;lastEffectTime?:number};
 type Dust = { x:number; y:number; vx:number; age:number; life:number; radius:number };
 const W = 960, H = 600, PW = 25, PH = 42, FIXED = 1 / 120;
 
@@ -29,6 +30,7 @@ export class GameScene extends Phaser.Scene {
   private followTarget?: Phaser.GameObjects.Zone; private cameraOffset=-CAMERA_LOOK_AHEAD;
   private dust:Dust[]=[]; private dustTimer=0; private runTime=0;
   private ceilingGripTime=0; private ceilingEntryVelocity=0;
+  private swingEffects=new CeilingSwingEffects(); private swingFrame:SwingEffectsFrame={lean:0,limbSwing:0,trail:[]};
   private multiplayer?:MultiplayerOptions; private remotePlayers=new Map<string,RemotePlayer>(); private networkClock=0; private stateSeq=0;
   private raceWinner?:{id:string;name:string}; private raceBanner?:Phaser.GameObjects.Text;
   private updateSpeedometer!:(speed:number)=>void;
@@ -77,7 +79,7 @@ export class GameScene extends Phaser.Scene {
   private updateRaceBanner():void {if(!this.raceBanner)return;this.raceBanner.setText(this.raceWinner?`GEWONNEN · ${this.raceWinner.name}`:'RENNEN · Wer zuerst ins Ziel kommt, gewinnt');}
   private addRemotePlayer(info:{id:string;name:string;bottle:number}):RemotePlayer {
     const label=this.add.text(0,0,info.name,{fontFamily:'Arial,sans-serif',fontSize:'11px',color:'#ffffff',stroke:'#10202d',strokeThickness:3,align:'center'}).setOrigin(.5,1).setDepth(10).setVisible(false);
-    const player={id:info.id,name:info.name,bottle:Math.max(0,Math.min(BOTTLES.length-1,Math.floor(info.bottle))),interpolator:new SnapshotInterpolator(),label};this.remotePlayers.set(info.id,player);return player;
+    const player={id:info.id,name:info.name,bottle:Math.max(0,Math.min(BOTTLES.length-1,Math.floor(info.bottle))),interpolator:new SnapshotInterpolator(),label,effects:new CeilingSwingEffects()};this.remotePlayers.set(info.id,player);return player;
   }
   private localState(finished=false):MultiplayerState{return {seq:++this.stateSeq,x:this.px,y:this.py,vx:this.vx,vy:this.vy,grounded:this.grounded,wall:this.wall,ceiling:this.ceiling,sliding:this.sliding,facing:this.facing,lean:this.lean,runPhase:this.runPhase,deaths:this.deaths,finished};}
   private publishLocalState(finished=false):void {if(this.multiplayer)this.multiplayer.onState(this.localState(finished));}
@@ -96,7 +98,7 @@ export class GameScene extends Phaser.Scene {
   private select(d:number):void{this.choice=((this.choice+d+3)%3) as BottleIndex;this.drawMenu();}
   private startGame():void {
     this.mode='play';this.level=generateLevel(this.seed,customModules);this.px=this.level.spawn.x;this.py=this.level.spawn.y;this.vx=this.vy=0;this.checkpoint={...this.level.spawn};this.activeCheckpoint=undefined;this.deaths=0;this.elapsed=0;this.accumulator=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.lean=0;this.runPhase=0;this.lastJump=false;this.clearUI();
-    this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.gfx.clear();
+    this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.swingEffects.reset();this.swingFrame=this.swingEffects.update(0,{x:this.px,y:this.py});this.gfx.clear();
     this.cameras.main.setBounds(-180,0,this.level.width+250,720);
     if (!this.followTarget || !this.followTarget.active) this.followTarget=this.add.zone(this.px,this.py,1,1);
     this.followTarget.setPosition(this.px+PW/2,this.py+PH/2);
@@ -144,12 +146,12 @@ export class GameScene extends Phaser.Scene {
     this.wall=decision.wall;this.ceiling=decision.ceiling;
     if(decision.jump==='drop'){
       // Only a held ceiling grip launches forward; wall release still drops normally.
-      if(wasCeiling&&contactCeiling){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=Math.max(this.vy,150);}
+      if(wasCeiling&&contactCeiling){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=Math.max(this.vy,150);this.swingEffects.trigger({x:this.px+PW/2,y:this.py+PH/2},Math.sign(this.vx)||this.facing);}
       else this.vy=Math.max(this.vy,90);
       this.releaseLock=RELEASE_LOCK_SECONDS;
     }
     else if(decision.jump==='wall'&&contactWall!==0){this.vy=-590;this.vx=wallJumpVelocity(contactWall,this.runTime);this.releaseLock=WALL_JUMP_LOCK_SECONDS;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
-    else if(decision.jump==='ceiling'){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=150;this.releaseLock=RELEASE_LOCK_SECONDS;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
+    else if(decision.jump==='ceiling'){this.vx=ceilingSwingVelocity(this.ceilingEntryVelocity,dir,this.facing,this.ceilingGripTime);this.vy=150;this.swingEffects.trigger({x:this.px+PW/2,y:this.py+PH/2},Math.sign(this.vx)||this.facing);this.releaseLock=RELEASE_LOCK_SECONDS;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
     else if(decision.jump==='ground'){this.vy=-590;this.jumpBuffer=0;this.grounded=false;this.coyote=0;}
     if(this.ceiling){this.ceilingGripTime+=dt;this.vy=0;this.vx=dir*190;}else if(this.wall){this.vx=0;this.vy=Math.max(0,Math.min(this.vy,35));}else{
       this.vx=horizontalVelocity(this.vx,dir,this.grounded,this.sliding,dt,runningSpeed(this.runTime));
@@ -180,6 +182,7 @@ export class GameScene extends Phaser.Scene {
     this.lean+=(leanTarget-this.lean)*(1-Math.exp(-12*dt));
     if(this.grounded&&!this.sliding) this.runPhase+=Math.min(1,Math.abs(this.vx)/RUN_SPEED)*24*dt;
     this.updateDust(dt,bh);
+    this.swingFrame=this.swingEffects.update(dt,{x:this.px+PW/2,y:this.py+bh/2});
     this.followTarget?.setPosition(this.px+PW/2,this.py+bh/2);
     this.drawWorld(bh);
     if(this.multiplayer){this.networkClock+=dt;if(this.networkClock>=1/18){this.networkClock%=1/18;this.publishLocalState();}}
@@ -191,7 +194,7 @@ export class GameScene extends Phaser.Scene {
     const module=this.level.modules[moduleIndex];
     this.moduleDebug.setText(module?`MODUL ${moduleIndex+1}/${this.level.modules.length} · ${module.name} · x ${Math.floor(this.px-module.startX)}/${module.endX-module.startX}`:'STARTBEREICH');
   }
-  private respawn():void{this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.deaths++;this.px=this.checkpoint.x;this.py=this.checkpoint.y;this.vx=this.vy=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.lean=0;}
+  private respawn():void{this.swingEffects.reset();this.swingFrame=this.swingEffects.update(0,{x:this.checkpoint.x,y:this.checkpoint.y});this.dust=[];this.dustTimer=0;this.runTime=0;this.ceilingGripTime=0;this.ceilingEntryVelocity=0;this.deaths++;this.px=this.checkpoint.x;this.py=this.checkpoint.y;this.vx=this.vy=0;this.grounded=false;this.wall=0;this.ceiling=false;this.sliding=false;this.coyote=0;this.jumpBuffer=0;this.releaseLock=0;this.lean=0;}
   private win():void{this.mode='won';if(this.multiplayer)this.publishLocalState(true);this.cameras.main.stopFollow();this.gfx.clear();drawFactoryEnvironment(this.gfx,this.level,this.cameras.main);if(this.multiplayer)this.drawRemotePlayers();this.clearUI();this.ui.add(this.text(W/2,190,'LEVEL GESCHAFFT!',38,'#ffd66b'));this.ui.add(this.text(W/2,260,`Zeit ${this.elapsed.toFixed(1)} s • Neustarts ${this.deaths}`,20));this.ui.add(this.text(W/2,330,`Seed ${this.seed.toString(16).toUpperCase()}`,16,'#9fb8ce'));if(this.multiplayer){this.ensureRaceBanner();this.ui.add(this.text(W/2,390,'Die anderen spielen weiter. Zurück zum Menü über die Shell.',15,'#b4c4d1'));}else{const again=this.text(W/2,420,'NOCH EIN RUN ↻',22,'#101b2c').setPadding(20,12,20,12).setBackgroundColor('#ffd66b').setInteractive();again.on('pointerdown',()=>{this.seed=Math.floor(Math.random()*0x7fffffff);this.startGame();});this.ui.add(again);this.ui.add(this.text(W/2,490,'ENTER oder SPACE zum Neustart',14,'#b4c4d1'));}}
   private updateDust(dt:number,bh:number):void {
     for(const puff of this.dust){puff.age+=dt;puff.x+=puff.vx*dt;puff.y-=10*dt;}
@@ -213,7 +216,8 @@ export class GameScene extends Phaser.Scene {
       g.fillStyle(0xc69b73,(1-t)*.48);g.fillCircle(puff.x,puff.y,puff.radius+t*4);
       g.fillStyle(0xe6c5a0,(1-t)*.28);g.fillCircle(puff.x-2,puff.y-2,puff.radius*.6+t*2);
     }
-    this.drawBottle(g,bh,{x:this.px,y:this.py,vx:this.vx,grounded:this.grounded,wall:this.wall,ceiling:this.ceiling,sliding:this.sliding,facing:this.facing,lean:this.lean,runPhase:this.runPhase,bottle:this.choice,animationTime:this.runPhase/24,gripMin:this.gripMin,gripMax:this.gripMax});
+    this.drawSwingTrail(g,this.swingFrame);
+    this.drawBottle(g,bh,{x:this.px,y:this.py,vx:this.vx,grounded:this.grounded,wall:this.wall,ceiling:this.ceiling,sliding:this.sliding,facing:this.facing,lean:this.lean,runPhase:this.runPhase,bottle:this.choice,animationTime:this.runPhase/24,gripMin:this.gripMin,gripMax:this.gripMax,swing:this.swingFrame});
   }
   private drawRemotePlayers():void {
     if(!this.multiplayer)return;
@@ -222,11 +226,25 @@ export class GameScene extends Phaser.Scene {
       const state=p.interpolator.sample(now);
       if(!state){p.label.setVisible(false);continue;}
       const mid=state.x+PW/2;
+      const previous=p.lastState,dt=p.lastEffectTime===undefined?0:Math.min(.1,Math.max(0,(now-p.lastEffectTime)/1000));
+      p.lastEffectTime=now;
+      if(previous&&state.deaths!==previous.deaths)p.effects.reset();
+      else if(previous?.ceiling&&!state.ceiling&&!state.grounded&&!state.wall&&Math.abs(state.vx)>200&&state.vy>=50)p.effects.trigger({x:mid,y:state.y+PH/2},Math.sign(state.vx)||state.facing);
+      p.lastState=state;
+      const swing=p.effects.update(dt,{x:mid,y:state.y+PH/2});
+      this.drawSwingTrail(this.gfx,swing);
       // Recover the same ceiling contact limits from the shared level geometry.
       const roof=state.ceiling?this.level.platforms.find(q=>q.kind==='solid'&&Math.abs(state.y-(q.y+q.h))<2&&mid>q.x&&mid<q.x+q.w):undefined;
-      this.drawBottle(this.gfx,PH,{...state,bottle:p.bottle,animationTime:state.runPhase/24,gripMin:roof?.x??mid-100,gripMax:roof?roof.x+roof.w:mid+100});
+      this.drawBottle(this.gfx,PH,{...state,bottle:p.bottle,animationTime:state.runPhase/24,gripMin:roof?.x??mid-100,gripMax:roof?roof.x+roof.w:mid+100,swing});
       p.label.setVisible(true).setText(p.name+(state.finished?' ✓':''));
       p.label.setPosition(mid,state.y-28);
+    }
+  }
+  private drawSwingTrail(g:Phaser.GameObjects.Graphics,frame:SwingEffectsFrame):void {
+    for(const p of frame.trail){
+      const alpha=p.alpha*p.alpha;
+      g.fillStyle(0xf08a42,alpha*.32);g.fillCircle(p.x,p.y,p.size*(1.1+(1-p.alpha)*.4));
+      g.fillStyle(0xffd38a,alpha*.55);g.fillCircle(p.x,p.y,p.size*.5);
     }
   }
   private drawBottle(g:Phaser.GameObjects.Graphics,h:number,pose:BottlePose):void {
@@ -235,7 +253,7 @@ export class GameScene extends Phaser.Scene {
     const speed=Math.min(1,Math.abs(pose.vx)/RUN_SPEED),phase=pose.runPhase;
     const stride=Math.sin(phase)*speed, airborne=!pose.grounded&&!pose.wall&&!pose.ceiling;
     // Rotate art around the feet; collision and contact targets remain in world coordinates.
-    const pivotX=mid,pivotY=y+h,angle=pose.lean,cos=Math.cos(angle),sin=Math.sin(angle);
+    const pivotX=mid,pivotY=y+h,angle=pose.lean+(pose.swing?.lean??0),cos=Math.cos(angle),sin=Math.sin(angle);
     const bodyPoint=(px:number,py:number)=>({x:pivotX+(px-pivotX)*cos-(py-pivotY)*sin,y:pivotY+(px-pivotX)*sin+(py-pivotY)*cos});
     const drawPair=(s:number)=>{
       const hip=bodyPoint(mid+s*1.5,y+h-6),shoulder=bodyPoint(mid+s*1.5,y+17);
@@ -244,9 +262,11 @@ export class GameScene extends Phaser.Scene {
       else if(pose.grounded){const legStride=stride*s;footX=mid+s*2+pose.facing*legStride*14;footY-=Math.max(0,legStride)*9;}
       else if(airborne){footX=hip.x+s*6;footY=hip.y+16+Math.sin(pose.animationTime*6+s)*2;}
       else{footX=hip.x+s*6;footY=hip.y+16;}
+      if(airborne&&pose.swing){footX+=pose.swing.limbSwing*s*12;footY-=Math.abs(pose.swing.limbSwing)*7;}
       this.drawLimb(g,hip.x,hip.y,footX,footY,11,11,pose.facing);
       const armSwing=stride*s;
       let handX=shoulder.x+pose.facing*(s*3-armSwing*12),handY=shoulder.y+12-Math.max(0,-armSwing)*7;
+      if(airborne&&pose.swing){handX-=pose.swing.limbSwing*s*10;handY-=Math.abs(pose.swing.limbSwing)*9;}
       if(pose.ceiling){handX=Phaser.Math.Clamp(mid+s*7,pose.gripMin+2,pose.gripMax-2);handY=physicsY;}
       else if(pose.wall){handX=pose.wall<0?x+PW:x;handY=shoulder.y+s*3;}
       this.drawLimb(g,shoulder.x,shoulder.y,handX,handY,12,12,-pose.facing);
