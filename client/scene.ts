@@ -7,6 +7,7 @@ import { drawFactoryEnvironment } from './factory';
 import { createControlHints, createSpeedometer } from './hud';
 import { SnapshotInterpolator } from './interpolation';
 import { customModules } from './custom-modules';
+import { CAMERA_LOOK_AHEAD, smoothCameraOffset } from './camera';
 
 type Mode = 'menu' | 'play' | 'won';
 export type MultiplayerState = {seq:number;x:number;y:number;vx:number;vy:number;grounded:boolean;wall:number;ceiling:boolean;sliding:boolean;facing:number;lean:number;runPhase:number;deaths:number;finished:boolean};
@@ -25,7 +26,7 @@ export class GameScene extends Phaser.Scene {
   private gripMin=0; private gripMax=0; private releaseLock=0; private lean=0; private runPhase=0;
   private coyote=0; private jumpBuffer=0; private checkpoint={x:40,y:456}; private deaths=0; private elapsed=0; private facing=1;
   private keys!: Record<string, Phaser.Input.Keyboard.Key>; private lastJump=false; private accumulator=0; private startOnCreate=false;
-  private followTarget?: Phaser.GameObjects.Zone;
+  private followTarget?: Phaser.GameObjects.Zone; private cameraOffset=-CAMERA_LOOK_AHEAD;
   private dust:Dust[]=[]; private dustTimer=0; private runTime=0;
   private ceilingGripTime=0; private ceilingEntryVelocity=0;
   private multiplayer?:MultiplayerOptions; private remotePlayers=new Map<string,RemotePlayer>(); private networkClock=0; private stateSeq=0;
@@ -99,7 +100,8 @@ export class GameScene extends Phaser.Scene {
     this.cameras.main.setBounds(-180,0,this.level.width+250,720);
     if (!this.followTarget || !this.followTarget.active) this.followTarget=this.add.zone(this.px,this.py,1,1);
     this.followTarget.setPosition(this.px+PW/2,this.py+PH/2);
-    this.cameras.main.startFollow(this.followTarget,false,.25,.25,-150,0);
+    this.cameraOffset=-this.facing*CAMERA_LOOK_AHEAD;
+    this.cameras.main.startFollow(this.followTarget,false,.25,.25,this.cameraOffset,0);
     this.cameras.main.centerOn(this.px+PW/2,this.py+PH/2);
     this.title=this.text(18,18,'',14,'#ffffff',0).setOrigin(0,0);this.progress=this.text(W-18,18,'',14,'#ffffff',1).setOrigin(1,0);
     this.moduleDebug=this.text(18,40,'',12,'#f8d39b',0).setOrigin(0,0).setBackgroundColor('#231711cc').setPadding(5,3,5,3);
@@ -154,7 +156,8 @@ export class GameScene extends Phaser.Scene {
       this.vy=Math.min(this.vy+1550*dt,850);if(!jump&&this.vy< -180)this.vy+=1100*dt;
     }
     if(dir)this.facing=dir;const oldX=this.px,oldY=this.py;this.px+=this.vx*dt;
-    this.cameras.main.setFollowOffset(-this.facing*150,0);
+    this.cameraOffset=smoothCameraOffset(this.cameraOffset,this.facing,dt);
+    this.cameras.main.setFollowOffset(this.cameraOffset,0);
     let blocked=false;
     for(const p of solids)if(overlap(this.px,this.py,PW,bh,p)){if(this.vx>0&&oldX+PW<=p.x+3)this.px=p.x-PW;else if(this.vx<0&&oldX>=p.x+p.w-3)this.px=p.x+p.w;this.vx=0;blocked=true;}
     this.py+=this.vy*dt;this.grounded=false;
