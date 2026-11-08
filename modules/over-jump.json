@@ -1,0 +1,30 @@
+{
+  "format": "super-flasch-module",
+  "version": 1,
+  "id": "a20b3a7c-606a-4858-8e1a-cc7aa6d85863",
+  "name": "over-jump",
+  "width": 840,
+  "platforms": [
+    {
+      "kind": "solid",
+      "x": 408,
+      "y": -120,
+      "w": 24,
+      "h": 120
+    },
+    {
+      "kind": "solid",
+      "x": 192,
+      "y": -144,
+      "w": 120,
+      "h": 28
+    },
+    {
+      "kind": "grip",
+      "x": 192,
+      "y": -120,
+      "w": 120,
+      "h": 12
+    }
+  ]
+}

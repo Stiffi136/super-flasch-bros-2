@@ -1,0 +1,23 @@
+{
+  "format": "super-flasch-module",
+  "version": 1,
+  "id": "35030da6-2ffe-4ce6-b480-013461c0c188",
+  "name": "long-boi",
+  "width": 840,
+  "platforms": [
+    {
+      "kind": "solid",
+      "x": 24,
+      "y": -120,
+      "w": 792,
+      "h": 24
+    },
+    {
+      "kind": "grip",
+      "x": 24,
+      "y": -96,
+      "w": 792,
+      "h": 8
+    }
+  ]
+}
